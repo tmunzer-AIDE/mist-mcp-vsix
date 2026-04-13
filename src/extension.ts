@@ -13,6 +13,7 @@ import {
   collectSkillDirectories,
   formatGitHubRepoSpecifier,
   getSkillNameFromDirectory,
+  isSafeSkillName,
   type GitHubRepoSpec
 } from "./skills-utils";
 
@@ -31,6 +32,7 @@ const FIXED_SKILLS_REPO_SPEC: GitHubRepoSpec = {
 };
 const DEFAULT_SKILLS_REF = "main";
 const DEFAULT_SKILLS_PATH_PREFIX = "";
+const GITHUB_FETCH_TIMEOUT_MS = 30_000;
 
 interface MistProfile {
   id: string;
@@ -910,11 +912,11 @@ async function removeInstalledSkills(context: vscode.ExtensionContext, output: v
   }
 
   for (const skillName of state.installedSkillNames) {
-    const skillPath = path.join(target.destinationRoot, skillName);
+    const skillPath = resolveSkillPathWithinRoot(target.destinationRoot, skillName);
     await fs.rm(skillPath, { recursive: true, force: true });
   }
 
-  await context.globalState.update(getManagedSkillsStateKey(target.scope), undefined);
+  await getManagedSkillsStorage(context, target.scope).update(getManagedSkillsStateKey(target.scope), undefined);
   output.appendLine(
     `Removed ${state.installedSkillNames.length} managed skill(s) from ${target.displayPath} (${target.scope}).`
   );
@@ -1000,7 +1002,8 @@ async function syncSkillsFromGitHub(options: {
         }
 
         for (const skillName of obsoleteManagedSkills) {
-          await fs.rm(path.join(target.destinationRoot, skillName), { recursive: true, force: true });
+          const skillPath = resolveSkillPathWithinRoot(target.destinationRoot, skillName);
+          await fs.rm(skillPath, { recursive: true, force: true });
         }
       }
     );
@@ -1019,7 +1022,7 @@ async function syncSkillsFromGitHub(options: {
     installedAt: new Date().toISOString()
   };
 
-  await context.globalState.update(getManagedSkillsStateKey(target.scope), nextState);
+  await getManagedSkillsStorage(context, target.scope).update(getManagedSkillsStateKey(target.scope), nextState);
   output.appendLine(
     `${mode === "install" ? "Installed" : "Updated"} ${skillNames.length} managed skill(s) from ${repoLabel}@${ref} to ${target.displayPath} (${target.scope}).`
   );
@@ -1042,7 +1045,8 @@ async function fetchGitHubTree(
     headers: {
       Accept: "application/vnd.github+json",
       "User-Agent": "mist-mcp-provider"
-    }
+    },
+    signal: AbortSignal.timeout(GITHUB_FETCH_TIMEOUT_MS)
   });
 
   const body = (await response.json()) as GitHubTreeResponse;
@@ -1056,9 +1060,10 @@ async function fetchGitHubTree(
   }
 
   if (body.truncated) {
-    output.appendLine(
-      `GitHub tree for ${formatGitHubRepoSpecifier(repoSpec)}@${ref} is truncated; only partial file listing is available.`
-    );
+    const message =
+      `GitHub tree for ${formatGitHubRepoSpecifier(repoSpec)}@${ref} is truncated; installation was aborted to avoid partial skill sync.`;
+    output.appendLine(message);
+    throw new Error(message);
   }
 
   const entries: Array<{ path: string; type: string }> = [];
@@ -1099,6 +1104,10 @@ function getRepoSkillFiles(treeEntries: Array<{ path: string; type: string }>, p
 
   const seen = new Map<string, string>();
   for (const skill of skills) {
+    if (!isSafeSkillName(skill.skillName)) {
+      throw new Error(`Invalid skill name "${skill.skillName}" found in ${skill.skillDirectory}.`);
+    }
+
     const duplicateSource = seen.get(skill.skillName);
     if (duplicateSource) {
       throw new Error(
@@ -1118,28 +1127,70 @@ async function writeSkillFromRepo(
   ref: string,
   skill: RepoSkillFiles
 ): Promise<void> {
-  const destinationSkillPath = path.join(destinationRoot, skill.skillName);
-  await fs.rm(destinationSkillPath, { recursive: true, force: true });
-  await fs.mkdir(destinationSkillPath, { recursive: true });
+  const destinationSkillPath = resolveSkillPathWithinRoot(destinationRoot, skill.skillName);
+  const tempSkillPath = path.join(
+    destinationRoot,
+    `.${skill.skillName}.tmp-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  );
+  const backupSkillPath = path.join(
+    destinationRoot,
+    `.${skill.skillName}.bak-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  );
 
-  const filePrefix = `${skill.skillDirectory}/`;
-  for (const repoPath of skill.filePaths) {
-    if (!repoPath.startsWith(filePrefix)) {
-      continue;
+  await fs.rm(tempSkillPath, { recursive: true, force: true });
+  await fs.mkdir(tempSkillPath, { recursive: true });
+
+  let movedExistingToBackup = false;
+  let movedTempToDestination = false;
+
+  try {
+    const filePrefix = `${skill.skillDirectory}/`;
+    for (const repoPath of skill.filePaths) {
+      if (!repoPath.startsWith(filePrefix)) {
+        continue;
+      }
+
+      const relativePath = repoPath.slice(filePrefix.length);
+      const safeSegments = getSafePathSegments(relativePath);
+      if (!safeSegments) {
+        throw new Error(`Invalid file path in repository: ${repoPath}`);
+      }
+
+      const destinationPath = path.join(tempSkillPath, ...safeSegments);
+      const destinationParent = path.dirname(destinationPath);
+      await fs.mkdir(destinationParent, { recursive: true });
+
+      const fileBytes = await fetchGitHubRawFile(repoSpec, ref, repoPath);
+      await fs.writeFile(destinationPath, fileBytes);
     }
 
-    const relativePath = repoPath.slice(filePrefix.length);
-    const safeSegments = getSafePathSegments(relativePath);
-    if (!safeSegments) {
-      throw new Error(`Invalid file path in repository: ${repoPath}`);
+    await fs.rm(backupSkillPath, { recursive: true, force: true });
+    try {
+      await fs.rename(destinationSkillPath, backupSkillPath);
+      movedExistingToBackup = true;
+    } catch (error) {
+      if (!isMissingPathError(error)) {
+        throw error;
+      }
     }
 
-    const destinationPath = path.join(destinationSkillPath, ...safeSegments);
-    const destinationParent = path.dirname(destinationPath);
-    await fs.mkdir(destinationParent, { recursive: true });
+    await fs.rename(tempSkillPath, destinationSkillPath);
+    movedTempToDestination = true;
 
-    const fileBytes = await fetchGitHubRawFile(repoSpec, ref, repoPath);
-    await fs.writeFile(destinationPath, fileBytes);
+    if (movedExistingToBackup) {
+      await fs.rm(backupSkillPath, { recursive: true, force: true });
+    }
+  } catch (error) {
+    if (!movedTempToDestination && movedExistingToBackup) {
+      try {
+        await fs.rename(backupSkillPath, destinationSkillPath);
+      } catch {
+        // If rollback fails, the original sync error remains the most actionable signal.
+      }
+    }
+
+    await fs.rm(tempSkillPath, { recursive: true, force: true });
+    throw error;
   }
 }
 
@@ -1154,7 +1205,8 @@ async function fetchGitHubRawFile(repoSpec: GitHubRepoSpec, ref: string, repoPat
   const response = await fetch(rawUrl, {
     headers: {
       "User-Agent": "mist-mcp-provider"
-    }
+    },
+    signal: AbortSignal.timeout(GITHUB_FETCH_TIMEOUT_MS)
   });
 
   if (!response.ok) {
@@ -1181,7 +1233,7 @@ function getSafePathSegments(relativePath: string): string[] | undefined {
 }
 
 function getManagedSkillsState(context: vscode.ExtensionContext, scope: SkillsInstallScope): ManagedSkillsState | undefined {
-  const raw = context.globalState.get<unknown>(getManagedSkillsStateKey(scope));
+  const raw = getManagedSkillsStorage(context, scope).get<unknown>(getManagedSkillsStateKey(scope));
   if (!raw || typeof raw !== "object") {
     return undefined;
   }
@@ -1210,6 +1262,10 @@ function getManagedSkillsState(context: vscode.ExtensionContext, scope: SkillsIn
 
 function getManagedSkillsStateKey(scope: SkillsInstallScope): string {
   return `${MANAGED_SKILLS_STATE_PREFIX}${scope}`;
+}
+
+function getManagedSkillsStorage(context: vscode.ExtensionContext, scope: SkillsInstallScope): vscode.Memento {
+  return scope === "workspace" ? context.workspaceState : context.globalState;
 }
 
 function getManagedSkillScopes(context: vscode.ExtensionContext): SkillsInstallScope[] {
@@ -1287,7 +1343,13 @@ function resolveSkillsTarget(scope: SkillsInstallScope): SkillsTarget | undefine
 async function getExistingSkillNames(destinationRoot: string, skillNames: string[]): Promise<string[]> {
   const existing: string[] = [];
   for (const skillName of skillNames) {
-    const skillPath = path.join(destinationRoot, skillName);
+    let skillPath: string;
+    try {
+      skillPath = resolveSkillPathWithinRoot(destinationRoot, skillName);
+    } catch {
+      continue;
+    }
+
     try {
       const stat = await fs.stat(skillPath);
       if (stat.isDirectory()) {
@@ -1299,6 +1361,29 @@ async function getExistingSkillNames(destinationRoot: string, skillNames: string
   }
 
   return existing;
+}
+
+function resolveSkillPathWithinRoot(destinationRoot: string, skillName: string): string {
+  if (!isSafeSkillName(skillName)) {
+    throw new Error(`Invalid skill name "${skillName}".`);
+  }
+
+  const rootPath = path.resolve(destinationRoot);
+  const candidatePath = path.resolve(destinationRoot, skillName);
+  if (!candidatePath.startsWith(`${rootPath}${path.sep}`)) {
+    throw new Error(`Skill name "${skillName}" would escape the destination root.`);
+  }
+
+  return candidatePath;
+}
+
+function isMissingPathError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const candidate = error as { code?: string };
+  return candidate.code === "ENOENT";
 }
 
 async function migrateLegacySettingsIfNeeded(

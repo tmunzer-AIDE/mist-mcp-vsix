@@ -4,6 +4,7 @@ import {
   collectSkillDirectories,
   formatGitHubRepoSpecifier,
   getSkillNameFromDirectory,
+  isSafeSkillName,
   parseGitHubRepoSpecifier
 } from "../skills-utils";
 
@@ -45,4 +46,12 @@ test("collectSkillDirectories finds directories containing SKILL.md", () => {
 test("format and name helpers return stable values", () => {
   assert.equal(formatGitHubRepoSpecifier({ owner: "tmunzer-AIDE", repo: "mist-skills" }), "tmunzer-AIDE/mist-skills");
   assert.equal(getSkillNameFromDirectory("skills/network"), "network");
+});
+
+test("isSafeSkillName rejects path traversal and separators", () => {
+  assert.equal(isSafeSkillName("network"), true);
+  assert.equal(isSafeSkillName(".."), false);
+  assert.equal(isSafeSkillName("."), false);
+  assert.equal(isSafeSkillName("folder/name"), false);
+  assert.equal(isSafeSkillName("folder\\name"), false);
 });

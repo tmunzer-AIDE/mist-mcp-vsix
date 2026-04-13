@@ -80,6 +80,27 @@ export function getSkillNameFromDirectory(skillDirectory: string): string {
   return parts[parts.length - 1] ?? skillDirectory;
 }
 
+export function isSafeSkillName(skillName: string): boolean {
+  const normalized = skillName.trim();
+  if (!normalized) {
+    return false;
+  }
+
+  if (normalized === "." || normalized === "..") {
+    return false;
+  }
+
+  if (normalized.includes("/") || normalized.includes("\\")) {
+    return false;
+  }
+
+  if (normalized.includes("\0")) {
+    return false;
+  }
+
+  return true;
+}
+
 function normalizePrefix(prefix?: string): string {
   if (!prefix) {
     return "";
