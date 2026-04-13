@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.2.4 - 2026-04-13
+
+- Added managed Skills commands to install, update, and remove Copilot skills from `https://github.com/tmunzer-AIDE/mist-skills`.
+- Added support for both workspace skill installs (`.github/skills`) and personal/global installs (`~/.copilot/skills`).
+- Added token verification against `GET /api/v1/self` before storing profile tokens, including cloud-specific validation messaging.
+- Added host-change safeguards that validate existing stored tokens against the newly selected cloud before profile updates are saved.
+- Improved token prompt behavior so pressing Escape cancels profile edits/configuration instead of silently continuing.
+- Hardened managed skill state handling by using workspace-scoped state for workspace installs and sanitizing persisted skill names/IDs.
+- Hardened skill sync and file safety with path validation, atomic temp/backup writes, rollback protection, and safe backup cleanup.
+- Added cancellable skill sync with aggregate timeout controls and clearer cancellation/error reporting.
+- Improved partial-failure handling by persisting recoverable sync state, tracking cleanup failures, and avoiding state loss on partial removals.
+- Improved UX messages for scope fallback, ref fallback, obsolete cleanup warnings, and single-toast sync result notifications.
+
 ## 0.2.3 - 2026-04-13
 
 - Triggered MCP server definition refresh when clearing the active profile token to force header re-resolution.
