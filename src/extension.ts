@@ -116,10 +116,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
       const tokenResult = await getOrPromptTokenForProfile(context, profile, output);
       if (!tokenResult.token) {
-        output.appendLine("MCP resolve cancelled: token is missing.");
         if (tokenResult.reason === "missing") {
+          output.appendLine("MCP resolve cancelled: no API token was provided.");
           vscode.window.showWarningMessage("Mist MCP server was not started because no API token was provided.");
+        } else {
+          output.appendLine("MCP resolve cancelled: provided token failed validation.");
         }
+
         return undefined;
       }
 
