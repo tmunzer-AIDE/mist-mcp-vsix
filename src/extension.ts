@@ -74,6 +74,8 @@ interface RepoSkillFiles {
   filePaths: string[];
 }
 
+type StoredTokenValidationResult = "valid" | "missing" | "malformed" | "invalid";
+
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Mist MCP Provider");
   context.subscriptions.push(output);
@@ -302,10 +304,16 @@ async function configureProfile(
     return;
   }
 
-  const token = await promptForOptionalToken({
+  const tokenInput = await promptForOptionalToken({
     title: "Mist MCP Token",
     prompt: "Enter a new token or leave empty to keep the existing one"
   });
+  if (tokenInput === undefined) {
+    vscode.window.showInformationMessage("Configuration cancelled.");
+    return;
+  }
+
+  const token = tokenInput === "" ? undefined : tokenInput;
   if (token) {
     const isValidToken = await validateTokenForHost(host, token, output);
     if (!isValidToken) {
@@ -315,11 +323,23 @@ async function configureProfile(
 
     await context.secrets.store(getProfileTokenSecretKey(existingProfile.id), token);
   } else if (host !== existingProfile.host) {
-    const isExistingTokenValid = await validateStoredTokenForHost(context, existingProfile, host, output);
-    if (!isExistingTokenValid) {
-      vscode.window.showWarningMessage(
-        "Configuration cancelled: existing token is invalid for the selected cloud. Enter a new token."
-      );
+    const storedTokenValidation = await validateStoredTokenForHost(context, existingProfile, host, output);
+    if (storedTokenValidation !== "valid") {
+      if (storedTokenValidation === "missing") {
+        vscode.window.showWarningMessage(
+          "Configuration cancelled: no valid stored token found for this profile. Enter a token for the selected cloud."
+        );
+        return;
+      }
+
+      if (storedTokenValidation === "malformed") {
+        vscode.window.showWarningMessage(
+          "Configuration cancelled: no valid stored token found for this profile. Enter a token for the selected cloud."
+        );
+        return;
+      }
+
+      vscode.window.showWarningMessage("Configuration cancelled: existing token is invalid for the selected cloud.");
       return;
     }
   }
@@ -410,10 +430,17 @@ async function editProfile(
     return;
   }
 
-  const token = await promptForOptionalToken({
+  const tokenInput = await promptForOptionalToken({
     title: "Mist MCP Profile Token",
     prompt: "Enter a new token or leave empty to keep the existing one"
   });
+
+  if (tokenInput === undefined) {
+    vscode.window.showInformationMessage("Edit cancelled.");
+    return;
+  }
+
+  const token = tokenInput === "" ? undefined : tokenInput;
 
   let replacedToken = false;
   if (token) {
@@ -426,11 +453,16 @@ async function editProfile(
     await context.secrets.store(getProfileTokenSecretKey(selectedProfile.id), token);
     replacedToken = true;
   } else if (host !== selectedProfile.host) {
-    const isExistingTokenValid = await validateStoredTokenForHost(context, selectedProfile, host, output);
-    if (!isExistingTokenValid) {
-      vscode.window.showWarningMessage(
-        "Edit cancelled: existing token is invalid for the selected cloud. Enter a new token."
-      );
+    const storedTokenValidation = await validateStoredTokenForHost(context, selectedProfile, host, output);
+    if (storedTokenValidation !== "valid") {
+      if (storedTokenValidation === "missing" || storedTokenValidation === "malformed") {
+        vscode.window.showWarningMessage(
+          "Edit cancelled: no valid stored token found for this profile. Enter a token for the selected cloud."
+        );
+        return;
+      }
+
+      vscode.window.showWarningMessage("Edit cancelled: existing token is invalid for the selected cloud.");
       return;
     }
   }
@@ -623,15 +655,21 @@ async function validateStoredTokenForHost(
   profile: MistProfile,
   host: string,
   output: vscode.OutputChannel
-): Promise<boolean> {
+): Promise<StoredTokenValidationResult> {
   const existingToken = await context.secrets.get(getProfileTokenSecretKey(profile.id));
   const normalizedToken = existingToken?.trim();
-  if (!normalizedToken || !isSafeHeaderValue(normalizedToken)) {
-    output.appendLine(`Stored token for profile ${profile.name} is missing or invalid while validating host change.`);
-    return false;
+  if (!normalizedToken) {
+    output.appendLine(`Stored token for profile ${profile.name} is missing while validating host change.`);
+    return "missing";
   }
 
-  return validateTokenForHost(host, normalizedToken, output);
+  if (!isSafeHeaderValue(normalizedToken)) {
+    output.appendLine(`Stored token for profile ${profile.name} is malformed while validating host change.`);
+    return "malformed";
+  }
+
+  const isValidToken = await validateTokenForHost(host, normalizedToken, output);
+  return isValidToken ? "valid" : "invalid";
 }
 
 async function readResponseSnippet(response: Response): Promise<string | undefined> {
@@ -732,7 +770,7 @@ async function promptForToken(): Promise<string | undefined> {
   return normalized;
 }
 
-async function promptForOptionalToken(options: { title: string; prompt: string }): Promise<string | undefined> {
+async function promptForOptionalToken(options: { title: string; prompt: string }): Promise<string | "" | undefined> {
   const token = await vscode.window.showInputBox({
     title: options.title,
     prompt: options.prompt,
@@ -752,9 +790,13 @@ async function promptForOptionalToken(options: { title: string; prompt: string }
     }
   });
 
+  if (token === undefined) {
+    return undefined;
+  }
+
   const normalized = token?.trim();
   if (!normalized) {
-    return undefined;
+    return "";
   }
 
   if (!isSafeHeaderValue(normalized)) {
@@ -1199,11 +1241,16 @@ async function syncSkillsFromGitHub(options: {
   } catch (error) {
     const details = error instanceof Error ? error.message : String(error);
     if (syncedSkillNames.length > 0) {
+      const preservedPreviousSkills = previousSkills.filter(
+        (name) => installedSet.has(name) && !syncedSkillNames.includes(name)
+      );
+      const partialInstalledSkillNames = Array.from(new Set([...syncedSkillNames, ...preservedPreviousSkills]));
+
       const partialState: ManagedSkillsState = {
         repo: repoLabel,
         ref,
         pathPrefix,
-        installedSkillNames: [...syncedSkillNames],
+        installedSkillNames: partialInstalledSkillNames,
         installedAt: new Date().toISOString()
       };
 
