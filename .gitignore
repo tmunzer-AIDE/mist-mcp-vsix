@@ -3,3 +3,5 @@ out
 *.vsix
 dist/*
 !dist/.gitkeep
+.claude
+.github

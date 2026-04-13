@@ -269,14 +269,14 @@ async function configureProfile(
       return;
     }
 
-    const token = await promptForToken();
-    if (!token) {
-      vscode.window.showWarningMessage("Configuration cancelled: token was not provided.");
-      return;
-    }
+    const tokenResult = await promptForValidatedToken(host, output);
+    if (!tokenResult.token) {
+      if (tokenResult.reason === "missing") {
+        vscode.window.showWarningMessage("Configuration cancelled: token was not provided.");
+      } else {
+        vscode.window.showInformationMessage("Configuration cancelled.");
+      }
 
-    const isValidToken = await validateTokenForHost(host, token, output);
-    if (!isValidToken) {
       return;
     }
 
@@ -289,7 +289,7 @@ async function configureProfile(
     const nextProfiles = [...profiles, newProfile];
     await saveProfiles(context, nextProfiles);
     await context.globalState.update(ACTIVE_PROFILE_STATE_KEY, newProfile.id);
-    await context.secrets.store(getProfileTokenSecretKey(newProfile.id), token);
+    await context.secrets.store(getProfileTokenSecretKey(newProfile.id), tokenResult.token);
     refreshServerDefinitions();
     output.appendLine(`Added profile ${newProfile.name} (${newProfile.host}).`);
     vscode.window.showInformationMessage(`Mist MCP profile ${newProfile.name} saved and set active.`);
@@ -308,7 +308,7 @@ async function configureProfile(
     return;
   }
 
-  const tokenInput = await promptForOptionalToken({
+  const tokenInput = await promptForOptionalValidatedToken(host, output, {
     title: "Mist MCP Token",
     prompt: "Enter a new token or leave empty to keep the existing one"
   });
@@ -319,11 +319,6 @@ async function configureProfile(
 
   const token = tokenInput === "" ? undefined : tokenInput;
   if (token) {
-    const isValidToken = await validateTokenForHost(host, token, output);
-    if (!isValidToken) {
-      return;
-    }
-
     await context.secrets.store(getProfileTokenSecretKey(existingProfile.id), token);
   } else if (host !== existingProfile.host) {
     const storedTokenValidation = await validateStoredTokenForHost(context, existingProfile, host, output);
@@ -431,7 +426,7 @@ async function editProfile(
     return;
   }
 
-  const tokenInput = await promptForOptionalToken({
+  const tokenInput = await promptForOptionalValidatedToken(host, output, {
     title: "Mist MCP Profile Token",
     prompt: "Enter a new token or leave empty to keep the existing one"
   });
@@ -445,11 +440,6 @@ async function editProfile(
 
   let replacedToken = false;
   if (token) {
-    const isValidToken = await validateTokenForHost(host, token, output);
-    if (!isValidToken) {
-      return;
-    }
-
     await context.secrets.store(getProfileTokenSecretKey(selectedProfile.id), token);
     replacedToken = true;
   } else if (host !== selectedProfile.host) {
@@ -589,19 +579,14 @@ async function getOrPromptTokenForProfile(
     );
   }
 
-  const token = await promptForToken();
-  if (!token) {
-    return { reason: "missing" };
+  const tokenResult = await promptForValidatedToken(profile.host, output);
+  if (!tokenResult.token) {
+    return tokenResult;
   }
 
-  const isValidToken = await validateTokenForHost(profile.host, token, output);
-  if (!isValidToken) {
-    return { reason: "validation_failed" };
-  }
+  await context.secrets.store(secretKey, tokenResult.token);
 
-  await context.secrets.store(secretKey, token);
-
-  return { token, reason: "ok" };
+  return tokenResult;
 }
 
 async function validateTokenForHost(
@@ -802,6 +787,50 @@ async function promptForOptionalToken(options: { title: string; prompt: string }
   }
 
   return normalized;
+}
+
+async function promptForValidatedToken(
+  host: string,
+  output: vscode.OutputChannel
+): Promise<PromptedTokenResult> {
+  let hadValidationFailure = false;
+
+  while (true) {
+    const token = await promptForToken();
+    if (!token) {
+      return {
+        reason: hadValidationFailure ? "validation_failed" : "missing"
+      };
+    }
+
+    const isValidToken = await validateTokenForHost(host, token, output);
+    if (isValidToken) {
+      return {
+        token,
+        reason: "ok"
+      };
+    }
+
+    hadValidationFailure = true;
+  }
+}
+
+async function promptForOptionalValidatedToken(
+  host: string,
+  output: vscode.OutputChannel,
+  options: { title: string; prompt: string }
+): Promise<string | "" | undefined> {
+  while (true) {
+    const tokenInput = await promptForOptionalToken(options);
+    if (tokenInput === undefined || tokenInput === "") {
+      return tokenInput;
+    }
+
+    const isValidToken = await validateTokenForHost(host, tokenInput, output);
+    if (isValidToken) {
+      return tokenInput;
+    }
+  }
 }
 
 async function promptForProfileName(existingProfiles: MistProfile[]): Promise<string | undefined> {
