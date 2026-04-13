@@ -1328,13 +1328,13 @@ async function syncSkillsFromGitHub(options: {
         `Completed skill sync with ${failedObsoleteSkillNames.length} obsolete cleanup warning(s): ${failedObsoleteSkillNames.join(", ")}.`
       );
       vscode.window.showWarningMessage(
-        `Skills synchronized, but ${failedObsoleteSkillNames.length} obsolete skill folder(s) could not be removed.`
+        `Skills synchronized (${skillNames.length} skill(s) written), but ${failedObsoleteSkillNames.length} obsolete folder(s) could not be removed.`
+      );
+    } else {
+      vscode.window.showInformationMessage(
+        `${mode === "install" ? "Installed" : "Updated"} ${skillNames.length} skill(s) in ${target.displayPath}.`
       );
     }
-
-    vscode.window.showInformationMessage(
-      `${mode === "install" ? "Installed" : "Updated"} ${skillNames.length} skill(s) in ${target.displayPath}.`
-    );
   } catch (error) {
     const details = error instanceof Error ? error.message : String(error);
     output.appendLine(`Failed to persist managed skills state after sync: ${details}`);
