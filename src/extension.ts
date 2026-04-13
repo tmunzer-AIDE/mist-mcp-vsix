@@ -33,6 +33,7 @@ const FIXED_SKILLS_REPO_SPEC: GitHubRepoSpec = {
 const DEFAULT_SKILLS_REF = "main";
 const DEFAULT_SKILLS_PATH_PREFIX = "";
 const GITHUB_FETCH_TIMEOUT_MS = 30_000;
+const TOKEN_VALIDATION_TIMEOUT_MS = 15_000;
 
 interface MistProfile {
   id: string;
@@ -108,7 +109,7 @@ export function activate(context: vscode.ExtensionContext): void {
         return undefined;
       }
 
-      const token = await getOrPromptTokenForProfile(context, profile);
+      const token = await getOrPromptTokenForProfile(context, profile, output);
       if (!token) {
         output.appendLine("MCP resolve cancelled: token is missing.");
         vscode.window.showWarningMessage("Mist MCP server was not started because no API token was provided.");
@@ -264,6 +265,12 @@ async function configureProfile(
       return;
     }
 
+    const isValidToken = await validateTokenForHost(host, token, output);
+    if (!isValidToken) {
+      vscode.window.showWarningMessage("Configuration cancelled: token is invalid for the selected cloud.");
+      return;
+    }
+
     const newProfile: MistProfile = {
       id: createProfileId(name),
       name,
@@ -297,6 +304,12 @@ async function configureProfile(
     prompt: "Enter a new token or leave empty to keep the existing one"
   });
   if (token) {
+    const isValidToken = await validateTokenForHost(host, token, output);
+    if (!isValidToken) {
+      vscode.window.showWarningMessage("Configuration cancelled: token is invalid for the selected cloud.");
+      return;
+    }
+
     await context.secrets.store(getProfileTokenSecretKey(existingProfile.id), token);
   }
 
@@ -393,6 +406,12 @@ async function editProfile(
 
   let replacedToken = false;
   if (token) {
+    const isValidToken = await validateTokenForHost(host, token, output);
+    if (!isValidToken) {
+      vscode.window.showWarningMessage("Edit cancelled: token is invalid for the selected cloud.");
+      return;
+    }
+
     await context.secrets.store(getProfileTokenSecretKey(selectedProfile.id), token);
     replacedToken = true;
   }
@@ -503,7 +522,8 @@ async function renameProfile(
 
 async function getOrPromptTokenForProfile(
   context: vscode.ExtensionContext,
-  profile: MistProfile
+  profile: MistProfile,
+  output: vscode.OutputChannel
 ): Promise<string | undefined> {
   const secretKey = getProfileTokenSecretKey(profile.id);
   const existing = await context.secrets.get(secretKey);
@@ -521,11 +541,75 @@ async function getOrPromptTokenForProfile(
   }
 
   const token = await promptForToken();
-  if (token) {
-    await context.secrets.store(secretKey, token);
+  if (!token) {
+    return undefined;
   }
 
+  const isValidToken = await validateTokenForHost(profile.host, token, output);
+  if (!isValidToken) {
+    return undefined;
+  }
+
+  await context.secrets.store(secretKey, token);
+
   return token;
+}
+
+async function validateTokenForHost(
+  host: string,
+  token: string,
+  output: vscode.OutputChannel
+): Promise<boolean> {
+  const endpoint = new URL("/api/v1/self", host).toString();
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Token ${token}`
+      },
+      signal: AbortSignal.timeout(TOKEN_VALIDATION_TIMEOUT_MS)
+    });
+
+    if (response.ok) {
+      return true;
+    }
+
+    if (response.status === 401 || response.status === 403) {
+      vscode.window.showErrorMessage(`The API token is invalid for the selected cloud (${host}).`);
+      output.appendLine(`Token validation rejected for cloud ${host}: HTTP ${response.status}.`);
+      return false;
+    }
+
+    const responseDetail = await readResponseSnippet(response);
+    const detailSuffix = responseDetail ? ` ${responseDetail}` : "";
+    vscode.window.showErrorMessage(
+      `Unable to validate API token for ${host} (HTTP ${response.status}).${detailSuffix}`
+    );
+    output.appendLine(
+      `Token validation failed for cloud ${host}: HTTP ${response.status}.${responseDetail ? ` ${responseDetail}` : ""}`
+    );
+    return false;
+  } catch (error) {
+    const details = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(`Unable to validate API token for ${host}. ${details}`);
+    output.appendLine(`Token validation failed for cloud ${host}: ${details}`);
+    return false;
+  }
+}
+
+async function readResponseSnippet(response: Response): Promise<string | undefined> {
+  try {
+    const text = (await response.text()).trim();
+    if (!text) {
+      return undefined;
+    }
+
+    return text.length <= 160 ? text : `${text.slice(0, 157)}...`;
+  } catch {
+    return undefined;
+  }
 }
 
 async function getOrPromptActiveProfile(

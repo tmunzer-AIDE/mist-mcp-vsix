@@ -56,8 +56,10 @@ Default host is `https://api.mist.com`.
 1. Open Command Palette.
 2. Run `Mist MCP: Add or Update Profile`.
 3. Choose **Add New Profile** or select an existing profile to update.
-4. Enter the profile token.
-5. Select the profile host URL.
+4. Select the profile host URL.
+5. Enter the profile token.
+
+Before saving a token, the extension validates it against `GET /api/v1/self` on the selected cloud host. If the token is invalid for that cloud, the UI shows an error and does not save the token.
 
 The token is saved in VS Code Secret Storage and the host is saved in extension state.
 
