@@ -1130,22 +1130,22 @@ async function syncSkillsFromGitHub(options: {
 
         try {
           throwIfSignalAborted(syncAbortController.signal);
-        await fs.mkdir(target.destinationRoot, { recursive: true });
+          await fs.mkdir(target.destinationRoot, { recursive: true });
 
-        let index = 0;
-        for (const skill of repoSkills) {
-          throwIfSignalAborted(syncAbortController.signal);
-          index += 1;
-          progress.report({ message: `Syncing ${skill.skillName} (${index}/${repoSkills.length})` });
-          await writeSkillFromRepo(target.destinationRoot, repoSpec, ref, skill, syncAbortController.signal);
-          syncedSkillNames.push(skill.skillName);
-        }
+          let index = 0;
+          for (const skill of repoSkills) {
+            throwIfSignalAborted(syncAbortController.signal);
+            index += 1;
+            progress.report({ message: `Syncing ${skill.skillName} (${index}/${repoSkills.length})` });
+            await writeSkillFromRepo(target.destinationRoot, repoSpec, ref, skill, syncAbortController.signal);
+            syncedSkillNames.push(skill.skillName);
+          }
 
-        for (const skillName of obsoleteManagedSkills) {
-          throwIfSignalAborted(syncAbortController.signal);
-          const skillPath = resolveSkillPathWithinRoot(target.destinationRoot, skillName);
-          await fs.rm(skillPath, { recursive: true, force: true });
-        }
+          for (const skillName of obsoleteManagedSkills) {
+            throwIfSignalAborted(syncAbortController.signal);
+            const skillPath = resolveSkillPathWithinRoot(target.destinationRoot, skillName);
+            await fs.rm(skillPath, { recursive: true, force: true });
+          }
         } finally {
           cancellationSubscription.dispose();
         }
