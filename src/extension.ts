@@ -35,6 +35,7 @@ const DEFAULT_SKILLS_PATH_PREFIX = "";
 const GITHUB_FETCH_TIMEOUT_MS = 30_000;
 const SKILLS_SYNC_TIMEOUT_MS = 180_000;
 const TOKEN_VALIDATION_TIMEOUT_MS = 15_000;
+const USER_CANCEL_REASON = "Skills sync cancelled by user.";
 
 interface MistProfile {
   id: string;
@@ -1162,7 +1163,7 @@ async function syncSkillsFromGitHub(options: {
       },
       async (progress, cancellationToken) => {
         const cancellationSubscription = cancellationToken.onCancellationRequested(() => {
-          syncAbortController.abort(new Error("Skills sync cancelled by user."));
+          syncAbortController.abort(new Error(USER_CANCEL_REASON));
         });
 
         try {
@@ -1216,6 +1217,7 @@ async function syncSkillsFromGitHub(options: {
   }
 
   const syncedSkillNames: string[] = [];
+  const failedObsoleteSkillNames: string[] = [];
 
   try {
     await vscode.window.withProgress(
@@ -1226,7 +1228,7 @@ async function syncSkillsFromGitHub(options: {
       },
       async (progress, cancellationToken) => {
         const cancellationSubscription = cancellationToken.onCancellationRequested(() => {
-          syncAbortController.abort(new Error("Skills sync cancelled by user."));
+          syncAbortController.abort(new Error(USER_CANCEL_REASON));
         });
 
         try {
@@ -1243,8 +1245,14 @@ async function syncSkillsFromGitHub(options: {
           }
 
           for (const skillName of obsoleteManagedSkills) {
-            const skillPath = resolveSkillPathWithinRoot(target.destinationRoot, skillName);
-            await fs.rm(skillPath, { recursive: true, force: true });
+            try {
+              const skillPath = resolveSkillPathWithinRoot(target.destinationRoot, skillName);
+              await fs.rm(skillPath, { recursive: true, force: true });
+            } catch (error) {
+              failedObsoleteSkillNames.push(skillName);
+              const details = error instanceof Error ? error.message : String(error);
+              output.appendLine(`Failed to remove obsolete managed skill ${skillName}: ${details}`);
+            }
           }
         } finally {
           cancellationSubscription.dispose();
@@ -1303,7 +1311,10 @@ async function syncSkillsFromGitHub(options: {
     repo: repoLabel,
     ref,
     pathPrefix,
-    installedSkillNames: skillNames,
+    installedSkillNames:
+      failedObsoleteSkillNames.length > 0
+        ? Array.from(new Set([...skillNames, ...failedObsoleteSkillNames]))
+        : skillNames,
     installedAt: new Date().toISOString()
   };
 
@@ -1312,6 +1323,15 @@ async function syncSkillsFromGitHub(options: {
     output.appendLine(
       `${mode === "install" ? "Installed" : "Updated"} ${skillNames.length} managed skill(s) from ${repoLabel}@${ref} to ${target.displayPath} (${target.scope}).`
     );
+    if (failedObsoleteSkillNames.length > 0) {
+      output.appendLine(
+        `Completed skill sync with ${failedObsoleteSkillNames.length} obsolete cleanup warning(s): ${failedObsoleteSkillNames.join(", ")}.`
+      );
+      vscode.window.showWarningMessage(
+        `Skills synchronized, but ${failedObsoleteSkillNames.length} obsolete skill folder(s) could not be removed.`
+      );
+    }
+
     vscode.window.showInformationMessage(
       `${mode === "install" ? "Installed" : "Updated"} ${skillNames.length} skill(s) in ${target.displayPath}.`
     );
@@ -1570,9 +1590,10 @@ function getManagedSkillsState(context: vscode.ExtensionContext, scope: SkillsIn
     return undefined;
   }
 
-  const installedSkillNames = candidate.installedSkillNames.filter(
-    (name): name is string => typeof name === "string" && isSafeSkillName(name)
-  );
+  const installedSkillNames = candidate.installedSkillNames
+    .filter((name): name is string => typeof name === "string")
+    .map((name) => name.trim())
+    .filter((name) => isSafeSkillName(name));
 
   return {
     repo: candidate.repo,
@@ -1753,11 +1774,11 @@ function isUserCancelledSync(signal: AbortSignal): boolean {
 
   const reason = signal.reason;
   if (typeof reason === "string") {
-    return reason === "Skills sync cancelled by user.";
+    return reason === USER_CANCEL_REASON;
   }
 
   if (reason instanceof Error) {
-    return reason.message === "Skills sync cancelled by user.";
+    return reason.message === USER_CANCEL_REASON;
   }
 
   return false;
