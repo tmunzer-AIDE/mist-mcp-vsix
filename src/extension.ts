@@ -33,6 +33,7 @@ const FIXED_SKILLS_REPO_SPEC: GitHubRepoSpec = {
 const DEFAULT_SKILLS_REF = "main";
 const DEFAULT_SKILLS_PATH_PREFIX = "";
 const GITHUB_FETCH_TIMEOUT_MS = 30_000;
+const SKILLS_SYNC_TIMEOUT_MS = 180_000;
 const TOKEN_VALIDATION_TIMEOUT_MS = 15_000;
 
 interface MistProfile {
@@ -952,12 +953,23 @@ async function updateInstalledSkills(context: vscode.ExtensionContext, output: v
     );
   }
 
+  const requestedRef = state.ref.trim();
+  const resolvedRef = requestedRef || DEFAULT_SKILLS_REF;
+  if (!requestedRef) {
+    output.appendLine(
+      `Stored skills ref for ${target.scope} scope was empty; falling back to default ref ${DEFAULT_SKILLS_REF}.`
+    );
+    vscode.window.showInformationMessage(
+      `Stored skills ref was empty. Falling back to default ref ${DEFAULT_SKILLS_REF}.`
+    );
+  }
+
   await syncSkillsFromGitHub({
     context,
     output,
     target,
     repoSpec: FIXED_SKILLS_REPO_SPEC,
-    ref: state.ref.trim() || DEFAULT_SKILLS_REF,
+    ref: resolvedRef,
     pathPrefix: state.pathPrefix.trim(),
     mode: "update",
     existingState: state
@@ -995,12 +1007,32 @@ async function removeInstalledSkills(context: vscode.ExtensionContext, output: v
     return;
   }
 
-  for (const skillName of state.installedSkillNames) {
-    const skillPath = resolveSkillPathWithinRoot(target.destinationRoot, skillName);
-    await fs.rm(skillPath, { recursive: true, force: true });
+  let removalError: unknown;
+  try {
+    for (const skillName of state.installedSkillNames) {
+      const skillPath = resolveSkillPathWithinRoot(target.destinationRoot, skillName);
+      await fs.rm(skillPath, { recursive: true, force: true });
+    }
+  } catch (error) {
+    removalError = error;
+    const details = error instanceof Error ? error.message : String(error);
+    output.appendLine(`Managed skill removal encountered an error: ${details}`);
+    vscode.window.showErrorMessage(`Failed to remove one or more managed skills: ${details}`);
   }
 
-  await getManagedSkillsStorage(context, target.scope).update(getManagedSkillsStateKey(target.scope), undefined);
+  try {
+    await getManagedSkillsStorage(context, target.scope).update(getManagedSkillsStateKey(target.scope), undefined);
+  } catch (error) {
+    const details = error instanceof Error ? error.message : String(error);
+    output.appendLine(`Failed to clear managed skills state for ${target.scope}: ${details}`);
+    vscode.window.showErrorMessage(`Failed to clear managed skills state: ${details}`);
+    return;
+  }
+
+  if (removalError) {
+    return;
+  }
+
   output.appendLine(
     `Removed ${state.installedSkillNames.length} managed skill(s) from ${target.displayPath} (${target.scope}).`
   );
@@ -1019,6 +1051,10 @@ async function syncSkillsFromGitHub(options: {
 }): Promise<void> {
   const { context, output, target, repoSpec, ref, pathPrefix, mode, existingState } = options;
   const repoLabel = formatGitHubRepoSpecifier(repoSpec);
+  const syncAbortController = new AbortController();
+  const syncTimeoutHandle = setTimeout(() => {
+    syncAbortController.abort(new Error(`Skills sync timed out after ${SKILLS_SYNC_TIMEOUT_MS / 1000} seconds.`));
+  }, SKILLS_SYNC_TIMEOUT_MS);
 
   let repoSkills: RepoSkillFiles[];
   try {
@@ -1026,19 +1062,28 @@ async function syncSkillsFromGitHub(options: {
       {
         location: vscode.ProgressLocation.Notification,
         title: mode === "install" ? "Installing skills" : "Updating skills",
-        cancellable: false
+        cancellable: true
       },
-      async (progress) => {
-        progress.report({ message: `Reading repository tree for ${repoLabel}@${ref}...` });
-        const treeEntries = await fetchGitHubTree(repoSpec, ref, output);
-        const skills = getRepoSkillFiles(treeEntries, pathPrefix);
-        return skills;
+      async (progress, cancellationToken) => {
+        const cancellationSubscription = cancellationToken.onCancellationRequested(() => {
+          syncAbortController.abort(new Error("Skills sync cancelled by user."));
+        });
+
+        try {
+          progress.report({ message: `Reading repository tree for ${repoLabel}@${ref}...` });
+          const treeEntries = await fetchGitHubTree(repoSpec, ref, output, syncAbortController.signal);
+          const skills = getRepoSkillFiles(treeEntries, pathPrefix);
+          return skills;
+        } finally {
+          cancellationSubscription.dispose();
+        }
       }
     );
   } catch (error) {
     const details = error instanceof Error ? error.message : String(error);
     output.appendLine(`Skill sync failed while reading ${repoLabel}@${ref}: ${details}`);
     vscode.window.showErrorMessage(`Unable to read skills from ${repoLabel}@${ref}: ${details}`);
+    clearTimeout(syncTimeoutHandle);
     return;
   }
 
@@ -1064,37 +1109,75 @@ async function syncSkillsFromGitHub(options: {
     );
 
     if (confirmed !== "Continue") {
+      clearTimeout(syncTimeoutHandle);
       return;
     }
   }
+
+  const syncedSkillNames: string[] = [];
 
   try {
     await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
         title: mode === "install" ? "Installing skills" : "Updating skills",
-        cancellable: false
+        cancellable: true
       },
-      async (progress) => {
+      async (progress, cancellationToken) => {
+        const cancellationSubscription = cancellationToken.onCancellationRequested(() => {
+          syncAbortController.abort(new Error("Skills sync cancelled by user."));
+        });
+
+        try {
+          throwIfSignalAborted(syncAbortController.signal);
         await fs.mkdir(target.destinationRoot, { recursive: true });
 
         let index = 0;
         for (const skill of repoSkills) {
+          throwIfSignalAborted(syncAbortController.signal);
           index += 1;
           progress.report({ message: `Syncing ${skill.skillName} (${index}/${repoSkills.length})` });
-          await writeSkillFromRepo(target.destinationRoot, repoSpec, ref, skill);
+          await writeSkillFromRepo(target.destinationRoot, repoSpec, ref, skill, syncAbortController.signal);
+          syncedSkillNames.push(skill.skillName);
         }
 
         for (const skillName of obsoleteManagedSkills) {
+          throwIfSignalAborted(syncAbortController.signal);
           const skillPath = resolveSkillPathWithinRoot(target.destinationRoot, skillName);
           await fs.rm(skillPath, { recursive: true, force: true });
+        }
+        } finally {
+          cancellationSubscription.dispose();
         }
       }
     );
   } catch (error) {
     const details = error instanceof Error ? error.message : String(error);
+    if (syncedSkillNames.length > 0) {
+      const partialState: ManagedSkillsState = {
+        repo: repoLabel,
+        ref,
+        pathPrefix,
+        installedSkillNames: [...syncedSkillNames],
+        installedAt: new Date().toISOString()
+      };
+
+      try {
+        await getManagedSkillsStorage(context, target.scope).update(getManagedSkillsStateKey(target.scope), partialState);
+        output.appendLine(
+          `Persisted partial managed skills state with ${syncedSkillNames.length} synchronized skill(s) after failure.`
+        );
+      } catch (persistError) {
+        const persistDetails = persistError instanceof Error ? persistError.message : String(persistError);
+        output.appendLine(`Failed to persist partial managed skills state: ${persistDetails}`);
+      }
+    }
+
     output.appendLine(`Skill sync failed while writing files: ${details}`);
-    vscode.window.showErrorMessage(`Skill installation failed: ${details}`);
+    vscode.window.showErrorMessage(
+      `Skill installation failed after syncing ${syncedSkillNames.length}/${repoSkills.length} skill(s): ${details}`
+    );
+    clearTimeout(syncTimeoutHandle);
     return;
   }
 
@@ -1113,12 +1196,14 @@ async function syncSkillsFromGitHub(options: {
   vscode.window.showInformationMessage(
     `${mode === "install" ? "Installed" : "Updated"} ${skillNames.length} skill(s) in ${target.displayPath}.`
   );
+  clearTimeout(syncTimeoutHandle);
 }
 
 async function fetchGitHubTree(
   repoSpec: GitHubRepoSpec,
   ref: string,
-  output: vscode.OutputChannel
+  output: vscode.OutputChannel,
+  syncSignal: AbortSignal
 ): Promise<Array<{ path: string; type: string }>> {
   const treeUrl = new URL(
     `https://api.github.com/repos/${repoSpec.owner}/${repoSpec.repo}/git/trees/${encodeURIComponent(ref)}`
@@ -1130,7 +1215,7 @@ async function fetchGitHubTree(
       Accept: "application/vnd.github+json",
       "User-Agent": "mist-mcp-provider"
     },
-    signal: AbortSignal.timeout(GITHUB_FETCH_TIMEOUT_MS)
+    signal: createFetchAbortSignal(syncSignal, GITHUB_FETCH_TIMEOUT_MS)
   });
 
   const body = (await response.json()) as GitHubTreeResponse;
@@ -1209,8 +1294,10 @@ async function writeSkillFromRepo(
   destinationRoot: string,
   repoSpec: GitHubRepoSpec,
   ref: string,
-  skill: RepoSkillFiles
+  skill: RepoSkillFiles,
+  syncSignal: AbortSignal
 ): Promise<void> {
+  throwIfSignalAborted(syncSignal);
   const destinationSkillPath = resolveSkillPathWithinRoot(destinationRoot, skill.skillName);
   const tempSkillPath = path.join(
     destinationRoot,
@@ -1230,6 +1317,7 @@ async function writeSkillFromRepo(
   try {
     const filePrefix = `${skill.skillDirectory}/`;
     for (const repoPath of skill.filePaths) {
+      throwIfSignalAborted(syncSignal);
       if (!repoPath.startsWith(filePrefix)) {
         continue;
       }
@@ -1244,7 +1332,7 @@ async function writeSkillFromRepo(
       const destinationParent = path.dirname(destinationPath);
       await fs.mkdir(destinationParent, { recursive: true });
 
-      const fileBytes = await fetchGitHubRawFile(repoSpec, ref, repoPath);
+      const fileBytes = await fetchGitHubRawFile(repoSpec, ref, repoPath, syncSignal);
       await fs.writeFile(destinationPath, fileBytes);
     }
 
@@ -1272,13 +1360,19 @@ async function writeSkillFromRepo(
         // If rollback fails, the original sync error remains the most actionable signal.
       }
     }
-
-    await fs.rm(tempSkillPath, { recursive: true, force: true });
     throw error;
+  } finally {
+    await fs.rm(tempSkillPath, { recursive: true, force: true });
+    await fs.rm(backupSkillPath, { recursive: true, force: true });
   }
 }
 
-async function fetchGitHubRawFile(repoSpec: GitHubRepoSpec, ref: string, repoPath: string): Promise<Buffer> {
+async function fetchGitHubRawFile(
+  repoSpec: GitHubRepoSpec,
+  ref: string,
+  repoPath: string,
+  syncSignal: AbortSignal
+): Promise<Buffer> {
   const encodedRef = encodeURIComponent(ref);
   const encodedPath = repoPath
     .split("/")
@@ -1290,7 +1384,7 @@ async function fetchGitHubRawFile(repoSpec: GitHubRepoSpec, ref: string, repoPat
     headers: {
       "User-Agent": "mist-mcp-provider"
     },
-    signal: AbortSignal.timeout(GITHUB_FETCH_TIMEOUT_MS)
+    signal: createFetchAbortSignal(syncSignal, GITHUB_FETCH_TIMEOUT_MS)
   });
 
   if (!response.ok) {
@@ -1333,7 +1427,9 @@ function getManagedSkillsState(context: vscode.ExtensionContext, scope: SkillsIn
     return undefined;
   }
 
-  const installedSkillNames = candidate.installedSkillNames.filter((name): name is string => typeof name === "string");
+  const installedSkillNames = candidate.installedSkillNames.filter(
+    (name): name is string => typeof name === "string" && isSafeSkillName(name)
+  );
 
   return {
     repo: candidate.repo,
@@ -1372,9 +1468,25 @@ async function promptForSkillsTarget(
   options: { title: string; placeHolder: string }
 ): Promise<SkillsTarget | undefined> {
   const uniqueScopes = Array.from(new Set(scopes));
-  const targets = uniqueScopes
-    .map((scope) => resolveSkillsTarget(scope))
-    .filter((target): target is SkillsTarget => Boolean(target));
+  const unavailableScopes: SkillsInstallScope[] = [];
+  const targets: SkillsTarget[] = [];
+
+  for (const scope of uniqueScopes) {
+    const target = resolveSkillsTarget(scope);
+    if (!target) {
+      unavailableScopes.push(scope);
+      continue;
+    }
+
+    targets.push(target);
+  }
+
+  if (unavailableScopes.includes("workspace")) {
+    const message = targets.some((target) => target.scope === "global")
+      ? "Workspace scope unavailable (no folder is open); using global scope."
+      : "Workspace scope unavailable because no folder is open.";
+    vscode.window.showInformationMessage(message);
+  }
 
   if (targets.length === 0) {
     vscode.window.showWarningMessage("No valid destination is available for skills.");
@@ -1468,6 +1580,27 @@ function isMissingPathError(error: unknown): boolean {
 
   const candidate = error as { code?: string };
   return candidate.code === "ENOENT";
+}
+
+function throwIfSignalAborted(signal: AbortSignal): void {
+  if (!signal.aborted) {
+    return;
+  }
+
+  const reason = signal.reason;
+  if (typeof reason === "string" && reason.trim()) {
+    throw new Error(reason);
+  }
+
+  if (reason instanceof Error) {
+    throw reason;
+  }
+
+  throw new Error("Operation cancelled.");
+}
+
+function createFetchAbortSignal(syncSignal: AbortSignal, timeoutMs: number): AbortSignal {
+  return AbortSignal.any([syncSignal, AbortSignal.timeout(timeoutMs)]);
 }
 
 async function migrateLegacySettingsIfNeeded(
