@@ -113,7 +113,9 @@ export function activate(context: vscode.ExtensionContext): void {
       const token = await getOrPromptTokenForProfile(context, profile, output);
       if (!token) {
         output.appendLine("MCP resolve cancelled: token is missing.");
-        vscode.window.showWarningMessage("Mist MCP server was not started because no API token was provided.");
+        vscode.window.showWarningMessage(
+          "Mist MCP server was not started because no API token was provided or the token failed validation."
+        );
         return undefined;
       }
 
@@ -312,6 +314,14 @@ async function configureProfile(
     }
 
     await context.secrets.store(getProfileTokenSecretKey(existingProfile.id), token);
+  } else if (host !== existingProfile.host) {
+    const isExistingTokenValid = await validateStoredTokenForHost(context, existingProfile, host, output);
+    if (!isExistingTokenValid) {
+      vscode.window.showWarningMessage(
+        "Configuration cancelled: existing token is invalid for the selected cloud. Enter a new token."
+      );
+      return;
+    }
   }
 
   const nextProfiles = profiles.map((profile) => {
@@ -415,6 +425,14 @@ async function editProfile(
 
     await context.secrets.store(getProfileTokenSecretKey(selectedProfile.id), token);
     replacedToken = true;
+  } else if (host !== selectedProfile.host) {
+    const isExistingTokenValid = await validateStoredTokenForHost(context, selectedProfile, host, output);
+    if (!isExistingTokenValid) {
+      vscode.window.showWarningMessage(
+        "Edit cancelled: existing token is invalid for the selected cloud. Enter a new token."
+      );
+      return;
+    }
   }
 
   const nextProfiles = profiles.map((profile) => {
@@ -598,6 +616,22 @@ async function validateTokenForHost(
     output.appendLine(`Token validation failed for cloud ${host}: ${details}`);
     return false;
   }
+}
+
+async function validateStoredTokenForHost(
+  context: vscode.ExtensionContext,
+  profile: MistProfile,
+  host: string,
+  output: vscode.OutputChannel
+): Promise<boolean> {
+  const existingToken = await context.secrets.get(getProfileTokenSecretKey(profile.id));
+  const normalizedToken = existingToken?.trim();
+  if (!normalizedToken || !isSafeHeaderValue(normalizedToken)) {
+    output.appendLine(`Stored token for profile ${profile.name} is missing or invalid while validating host change.`);
+    return false;
+  }
+
+  return validateTokenForHost(host, normalizedToken, output);
 }
 
 async function readResponseSnippet(response: Response): Promise<string | undefined> {
@@ -992,8 +1026,15 @@ async function removeInstalledSkills(context: vscode.ExtensionContext, output: v
   }
 
   const state = getManagedSkillsState(context, target.scope);
-  if (!state || state.installedSkillNames.length === 0) {
+  if (!state) {
     vscode.window.showInformationMessage("No managed skills are tracked for the selected target.");
+    return;
+  }
+
+  if (state.installedSkillNames.length === 0) {
+    await getManagedSkillsStorage(context, target.scope).update(getManagedSkillsStateKey(target.scope), undefined);
+    output.appendLine(`Cleared stale managed skills state for ${target.scope} scope.`);
+    vscode.window.showInformationMessage("No managed skills were listed. Stale managed state has been cleared.");
     return;
   }
 
@@ -1081,8 +1122,13 @@ async function syncSkillsFromGitHub(options: {
     );
   } catch (error) {
     const details = error instanceof Error ? error.message : String(error);
-    output.appendLine(`Skill sync failed while reading ${repoLabel}@${ref}: ${details}`);
-    vscode.window.showErrorMessage(`Unable to read skills from ${repoLabel}@${ref}: ${details}`);
+    if (isUserCancelledSync(syncAbortController.signal)) {
+      output.appendLine(`Skill sync cancelled by user while reading ${repoLabel}@${ref}.`);
+      vscode.window.showInformationMessage("Skills sync cancelled.");
+    } else {
+      output.appendLine(`Skill sync failed while reading ${repoLabel}@${ref}: ${details}`);
+      vscode.window.showErrorMessage(`Unable to read skills from ${repoLabel}@${ref}: ${details}`);
+    }
     clearTimeout(syncTimeoutHandle);
     return;
   }
@@ -1142,7 +1188,6 @@ async function syncSkillsFromGitHub(options: {
           }
 
           for (const skillName of obsoleteManagedSkills) {
-            throwIfSignalAborted(syncAbortController.signal);
             const skillPath = resolveSkillPathWithinRoot(target.destinationRoot, skillName);
             await fs.rm(skillPath, { recursive: true, force: true });
           }
@@ -1173,10 +1218,23 @@ async function syncSkillsFromGitHub(options: {
       }
     }
 
-    output.appendLine(`Skill sync failed while writing files: ${details}`);
-    vscode.window.showErrorMessage(
-      `Skill installation failed after syncing ${syncedSkillNames.length}/${repoSkills.length} skill(s): ${details}`
-    );
+    if (isUserCancelledSync(syncAbortController.signal)) {
+      output.appendLine(
+        `Skill sync cancelled by user after syncing ${syncedSkillNames.length}/${repoSkills.length} skill(s).`
+      );
+      if (syncedSkillNames.length > 0) {
+        vscode.window.showInformationMessage(
+          `Skills sync cancelled after syncing ${syncedSkillNames.length}/${repoSkills.length} skill(s).`
+        );
+      } else {
+        vscode.window.showInformationMessage("Skills sync cancelled.");
+      }
+    } else {
+      output.appendLine(`Skill sync failed while writing files: ${details}`);
+      vscode.window.showErrorMessage(
+        `Skill installation failed after syncing ${syncedSkillNames.length}/${repoSkills.length} skill(s): ${details}`
+      );
+    }
     clearTimeout(syncTimeoutHandle);
     return;
   }
@@ -1189,14 +1247,21 @@ async function syncSkillsFromGitHub(options: {
     installedAt: new Date().toISOString()
   };
 
-  await getManagedSkillsStorage(context, target.scope).update(getManagedSkillsStateKey(target.scope), nextState);
-  output.appendLine(
-    `${mode === "install" ? "Installed" : "Updated"} ${skillNames.length} managed skill(s) from ${repoLabel}@${ref} to ${target.displayPath} (${target.scope}).`
-  );
-  vscode.window.showInformationMessage(
-    `${mode === "install" ? "Installed" : "Updated"} ${skillNames.length} skill(s) in ${target.displayPath}.`
-  );
-  clearTimeout(syncTimeoutHandle);
+  try {
+    await getManagedSkillsStorage(context, target.scope).update(getManagedSkillsStateKey(target.scope), nextState);
+    output.appendLine(
+      `${mode === "install" ? "Installed" : "Updated"} ${skillNames.length} managed skill(s) from ${repoLabel}@${ref} to ${target.displayPath} (${target.scope}).`
+    );
+    vscode.window.showInformationMessage(
+      `${mode === "install" ? "Installed" : "Updated"} ${skillNames.length} skill(s) in ${target.displayPath}.`
+    );
+  } catch (error) {
+    const details = error instanceof Error ? error.message : String(error);
+    output.appendLine(`Failed to persist managed skills state after sync: ${details}`);
+    vscode.window.showErrorMessage(`Skills were synchronized, but saving managed state failed: ${details}`);
+  } finally {
+    clearTimeout(syncTimeoutHandle);
+  }
 }
 
 async function fetchGitHubTree(
@@ -1313,6 +1378,7 @@ async function writeSkillFromRepo(
 
   let movedExistingToBackup = false;
   let movedTempToDestination = false;
+  let rollbackSucceeded = false;
 
   try {
     const filePrefix = `${skill.skillDirectory}/`;
@@ -1356,6 +1422,7 @@ async function writeSkillFromRepo(
     if (!movedTempToDestination && movedExistingToBackup) {
       try {
         await fs.rename(backupSkillPath, destinationSkillPath);
+        rollbackSucceeded = true;
       } catch {
         // If rollback fails, the original sync error remains the most actionable signal.
       }
@@ -1363,7 +1430,9 @@ async function writeSkillFromRepo(
     throw error;
   } finally {
     await fs.rm(tempSkillPath, { recursive: true, force: true });
-    await fs.rm(backupSkillPath, { recursive: true, force: true });
+    if (movedTempToDestination || rollbackSucceeded || !movedExistingToBackup) {
+      await fs.rm(backupSkillPath, { recursive: true, force: true });
+    }
   }
 }
 
@@ -1403,6 +1472,10 @@ function getSafePathSegments(relativePath: string): string[] | undefined {
 
   for (const segment of segments) {
     if (segment === "." || segment === "..") {
+      return undefined;
+    }
+
+    if (segment.includes("\\") || segment.includes("\0")) {
       return undefined;
     }
   }
@@ -1451,12 +1524,12 @@ function getManagedSkillsStorage(context: vscode.ExtensionContext, scope: Skills
 function getManagedSkillScopes(context: vscode.ExtensionContext): SkillsInstallScope[] {
   const scopes: SkillsInstallScope[] = [];
   const workspaceState = getManagedSkillsState(context, "workspace");
-  if (workspaceState && workspaceState.installedSkillNames.length > 0) {
+  if (workspaceState) {
     scopes.push("workspace");
   }
 
   const globalState = getManagedSkillsState(context, "global");
-  if (globalState && globalState.installedSkillNames.length > 0) {
+  if (globalState) {
     scopes.push("global");
   }
 
@@ -1601,6 +1674,23 @@ function throwIfSignalAborted(signal: AbortSignal): void {
 
 function createFetchAbortSignal(syncSignal: AbortSignal, timeoutMs: number): AbortSignal {
   return AbortSignal.any([syncSignal, AbortSignal.timeout(timeoutMs)]);
+}
+
+function isUserCancelledSync(signal: AbortSignal): boolean {
+  if (!signal.aborted) {
+    return false;
+  }
+
+  const reason = signal.reason;
+  if (typeof reason === "string") {
+    return reason === "Skills sync cancelled by user.";
+  }
+
+  if (reason instanceof Error) {
+    return reason.message === "Skills sync cancelled by user.";
+  }
+
+  return false;
 }
 
 async function migrateLegacySettingsIfNeeded(
