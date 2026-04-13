@@ -66,10 +66,60 @@ If token or host is missing, VS Code prompts you.
 - Re-run `Mist MCP: Configure Token and Host` to change token/host.
 - Run `Mist MCP: Clear Stored Token` to remove the saved token.
 
-## Build and Package
+## Development
+
+### Prerequisites
+
+- Node.js 20+
+- npm 10+
+- VS Code 1.105+
+
+### Setup and validation
 
 ```bash
-make package VERSION=0.1.1
+npm install
+npm run compile
+npm test
 ```
 
-The generated VSIX is written to `dist/` and can then be distributed and installed in VS Code.
+### Watch mode
+
+```bash
+npm run watch
+```
+
+## Build and Package
+
+Build a distributable VSIX and set the extension version in one step:
+
+```bash
+make package VERSION=x.y.z
+```
+
+This command will:
+
+1. Update `package.json` version (without creating a git tag)
+2. Install dependencies
+3. Compile TypeScript
+4. Run tests
+5. Package the extension
+
+Output artifact:
+
+- `dist/mist-mcp-provider-<version>.vsix`
+
+Clean build outputs:
+
+```bash
+make clean
+```
+
+## Contributing
+
+1. Create a feature branch.
+2. Implement changes in `src/` and add or update tests in `src/test/`.
+3. Run `npm test` and `make package VERSION=x.y.z`.
+4. Update README when behavior, commands, or build flow changes.
+5. Open a pull request with a short summary and test notes.
+
+Never commit API tokens or other secrets.
