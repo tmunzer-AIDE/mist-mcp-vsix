@@ -3,7 +3,7 @@
   "displayName": "Mist MCP Provider",
   "description": "Provides a preconfigured Mist MCP server for VS Code.",
   "icon": "media/icon.png",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "publisher": "tmunzer",
   "repository": {
     "type": "git",
@@ -53,6 +53,10 @@
       {
         "command": "mistMcpProvider.renameProfile",
         "title": "Mist MCP: Rename Profile"
+      },
+      {
+        "command": "mistMcpProvider.showActiveProfile",
+        "title": "Mist MCP: Show Active Profile"
       },
       {
         "command": "mistMcpProvider.clearToken",

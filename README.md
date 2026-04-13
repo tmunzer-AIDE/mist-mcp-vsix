@@ -43,6 +43,7 @@ Default host is `https://api.mist.com`.
 - `Mist MCP: Edit Profile`
 - `Mist MCP: Delete Profile`
 - `Mist MCP: Rename Profile`
+- `Mist MCP: Show Active Profile`
 - `Mist MCP: Clear Active Profile Token`
 
 ## Configure and Use
@@ -73,6 +74,12 @@ The token is saved in VS Code Secret Storage and the host is saved in extension 
   - `X-Mist-Base-URL: <selected-host>`
 
 If token or host is missing, VS Code prompts you.
+
+The MCP server entry label includes the active profile name, for example:
+
+- `Mist MCP Server (Prod)`
+
+You can also run `Mist MCP: Show Active Profile` from the Command Palette.
 
 ### 4. Update or reset later
 

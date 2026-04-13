@@ -2,11 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
-## 0.2.1 - 2026-04-13
+## 0.2.2 - 2026-04-13
 
+- Fixed host picker behavior to preselect the current host while editing profiles.
+- Fixed host picker error path to return cancellation instead of silently applying a fallback host.
+- Added safety checks for migrated and previously stored tokens before they can be reused.
+- Added user-facing warnings when invalid legacy/stored tokens are discarded.
+- Stopped automatically switching the active profile when editing an existing profile.
+- Added active profile visibility in the MCP server label and a command to show the active profile.
+- Refactored legacy migration flow to initialize once during activation and reuse that initialization across commands.
+- Expanded test coverage with profile utility tests (ID generation uniqueness and profile-name validation rules).
+
+## 0.2.1 - 2026-04-13
 - Hardened token validation to reject line breaks and control characters before storing or sending headers.
 - Tightened profile name validation (reserved names, character restrictions, and max length).
-- Switched profile selection logic to use internal profile IDs (avoids name/label collision edge cases).
 - Synced README command and endpoint documentation with current extension behavior.
 
 ## 0.2.0 - 2026-04-13

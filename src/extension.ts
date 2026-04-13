@@ -5,6 +5,7 @@ import {
   MIST_HOST_OPTIONS,
   MIST_SERVER_URI
 } from "./hosts";
+import { createProfileId, getProfileNameValidationError, isSafeHeaderValue } from "./profile-utils";
 
 const PROVIDER_ID = "mist.mcp.provider";
 const SERVER_LABEL = "Mist MCP Server";
@@ -13,9 +14,6 @@ const LEGACY_HOST_STATE_KEY = "mist.hostUrl";
 const PROFILES_STATE_KEY = "mist.profiles";
 const ACTIVE_PROFILE_STATE_KEY = "mist.activeProfile";
 const PROFILE_TOKEN_SECRET_PREFIX = "mist.profileToken.";
-const RESERVED_PROFILE_NAMES = new Set(["add new profile", "$(add) add new profile"]);
-const PROFILE_NAME_MAX_LENGTH = 64;
-const PROFILE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 ._-]*$/;
 
 interface MistProfile {
   id: string;
@@ -30,20 +28,31 @@ interface ProfileQuickPickItem extends vscode.QuickPickItem {
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Mist MCP Provider");
   context.subscriptions.push(output);
+  const didChangeEmitter = new vscode.EventEmitter<void>();
+  context.subscriptions.push(didChangeEmitter);
 
-  void migrateLegacySettingsIfNeeded(context, output);
+  const refreshServerDefinitions = (): void => {
+    didChangeEmitter.fire();
+  };
+
+  const migrationReady = migrateLegacySettingsIfNeeded(context, output).catch((error: unknown) => {
+    const details = error instanceof Error ? error.message : String(error);
+    output.appendLine(`Legacy migration failed: ${details}`);
+  });
 
   const provider: vscode.McpServerDefinitionProvider<vscode.McpHttpServerDefinition> = {
-    provideMcpServerDefinitions: () => {
+    onDidChangeMcpServerDefinitions: didChangeEmitter.event,
+    provideMcpServerDefinitions: async () => {
+      await migrationReady;
       output.appendLine("Providing Mist MCP server definition.");
-      return [new vscode.McpHttpServerDefinition(SERVER_LABEL, vscode.Uri.parse(MIST_SERVER_URI))];
+      return [new vscode.McpHttpServerDefinition(getServerLabel(context), vscode.Uri.parse(MIST_SERVER_URI))];
     },
     resolveMcpServerDefinition: async (server) => {
-      if (server.label !== SERVER_LABEL) {
+      if (!server.label.startsWith(SERVER_LABEL)) {
         return server;
       }
 
-      await migrateLegacySettingsIfNeeded(context, output);
+      await migrationReady;
 
       const profile = await getOrPromptActiveProfile(context, output);
       if (!profile) {
@@ -73,36 +82,55 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("mistMcpProvider.configure", async () => {
-      await configureProfile(context, output);
+      await migrationReady;
+      await configureProfile(context, output, refreshServerDefinitions);
     })
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("mistMcpProvider.selectProfile", async () => {
-      await selectActiveProfile(context, output);
+      await migrationReady;
+      await selectActiveProfile(context, output, refreshServerDefinitions);
     })
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("mistMcpProvider.editProfile", async () => {
-      await editProfile(context, output);
+      await migrationReady;
+      await editProfile(context, output, refreshServerDefinitions);
     })
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("mistMcpProvider.deleteProfile", async () => {
-      await deleteProfile(context, output);
+      await migrationReady;
+      await deleteProfile(context, output, refreshServerDefinitions);
     })
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("mistMcpProvider.renameProfile", async () => {
-      await renameProfile(context, output);
+      await migrationReady;
+      await renameProfile(context, output, refreshServerDefinitions);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("mistMcpProvider.showActiveProfile", async () => {
+      await migrationReady;
+      const activeProfile = getActiveProfile(context);
+      if (!activeProfile) {
+        vscode.window.showInformationMessage("No active Mist MCP profile is selected.");
+        return;
+      }
+
+      vscode.window.showInformationMessage(`Active Mist MCP profile: ${activeProfile.name} (${activeProfile.host})`);
     })
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("mistMcpProvider.clearToken", async () => {
+      await migrationReady;
       const profile = await getOrPromptActiveProfile(context, output);
       if (!profile) {
         return;
@@ -121,9 +149,11 @@ export function deactivate(): void {
   // Nothing to clean up. VS Code disposes subscriptions automatically.
 }
 
-async function configureProfile(context: vscode.ExtensionContext, output: vscode.OutputChannel): Promise<void> {
-  await migrateLegacySettingsIfNeeded(context, output);
-
+async function configureProfile(
+  context: vscode.ExtensionContext,
+  output: vscode.OutputChannel,
+  refreshServerDefinitions: () => void
+): Promise<void> {
   const profiles = getProfiles(context);
   const pickItems: Array<vscode.QuickPickItem & { action: "add" | "edit"; profileId?: string }> = [
     {
@@ -178,6 +208,7 @@ async function configureProfile(context: vscode.ExtensionContext, output: vscode
     await saveProfiles(context, nextProfiles);
     await context.globalState.update(ACTIVE_PROFILE_STATE_KEY, newProfile.id);
     await context.secrets.store(getProfileTokenSecretKey(newProfile.id), token);
+    refreshServerDefinitions();
     output.appendLine(`Added profile ${newProfile.name} (${newProfile.host}).`);
     vscode.window.showInformationMessage(`Mist MCP profile ${newProfile.name} saved and set active.`);
     return;
@@ -215,25 +246,27 @@ async function configureProfile(context: vscode.ExtensionContext, output: vscode
   });
 
   await saveProfiles(context, nextProfiles);
-  await context.globalState.update(ACTIVE_PROFILE_STATE_KEY, existingProfile.id);
+  refreshServerDefinitions();
 
   output.appendLine(`Updated profile ${existingProfile.name} (${host}).`);
   if (token) {
-    vscode.window.showInformationMessage(`Mist MCP profile ${existingProfile.name} updated, token replaced, and set active.`);
+    vscode.window.showInformationMessage(`Mist MCP profile ${existingProfile.name} updated, token replaced.`);
     return;
   }
 
-  vscode.window.showInformationMessage(`Mist MCP profile ${existingProfile.name} updated and set active.`);
+  vscode.window.showInformationMessage(`Mist MCP profile ${existingProfile.name} updated.`);
 }
 
-async function selectActiveProfile(context: vscode.ExtensionContext, output: vscode.OutputChannel): Promise<void> {
-  await migrateLegacySettingsIfNeeded(context, output);
-
+async function selectActiveProfile(
+  context: vscode.ExtensionContext,
+  output: vscode.OutputChannel,
+  refreshServerDefinitions: () => void
+): Promise<void> {
   const profiles = getProfiles(context);
   if (profiles.length === 0) {
     const action = await vscode.window.showInformationMessage("No Mist MCP profile is configured.", "Configure Profile");
     if (action === "Configure Profile") {
-      await configureProfile(context, output);
+      await configureProfile(context, output, refreshServerDefinitions);
     }
 
     return;
@@ -265,13 +298,16 @@ async function selectActiveProfile(context: vscode.ExtensionContext, output: vsc
   }
 
   await context.globalState.update(ACTIVE_PROFILE_STATE_KEY, profile.id);
+  refreshServerDefinitions();
   output.appendLine(`Active profile set to ${profile.name} (${profile.host}).`);
   vscode.window.showInformationMessage(`Mist MCP active profile set to ${profile.name}.`);
 }
 
-async function editProfile(context: vscode.ExtensionContext, output: vscode.OutputChannel): Promise<void> {
-  await migrateLegacySettingsIfNeeded(context, output);
-
+async function editProfile(
+  context: vscode.ExtensionContext,
+  output: vscode.OutputChannel,
+  refreshServerDefinitions: () => void
+): Promise<void> {
   const profiles = getProfiles(context);
   const selectedProfile = await promptForExistingProfile(profiles, "Edit Mist MCP Profile", "Choose a profile to edit");
   if (!selectedProfile) {
@@ -307,20 +343,22 @@ async function editProfile(context: vscode.ExtensionContext, output: vscode.Outp
   });
 
   await saveProfiles(context, nextProfiles);
-  await context.globalState.update(ACTIVE_PROFILE_STATE_KEY, selectedProfile.id);
+  refreshServerDefinitions();
 
   output.appendLine(`Edited profile ${selectedProfile.name} (${host}).`);
   if (replacedToken) {
-    vscode.window.showInformationMessage(`Profile ${selectedProfile.name} updated, token replaced, and set active.`);
+    vscode.window.showInformationMessage(`Profile ${selectedProfile.name} updated, token replaced.`);
     return;
   }
 
-  vscode.window.showInformationMessage(`Profile ${selectedProfile.name} updated and set active.`);
+  vscode.window.showInformationMessage(`Profile ${selectedProfile.name} updated.`);
 }
 
-async function deleteProfile(context: vscode.ExtensionContext, output: vscode.OutputChannel): Promise<void> {
-  await migrateLegacySettingsIfNeeded(context, output);
-
+async function deleteProfile(
+  context: vscode.ExtensionContext,
+  output: vscode.OutputChannel,
+  refreshServerDefinitions: () => void
+): Promise<void> {
   const profiles = getProfiles(context);
   const selectedProfile = await promptForExistingProfile(
     profiles,
@@ -350,14 +388,17 @@ async function deleteProfile(context: vscode.ExtensionContext, output: vscode.Ou
     const nextActiveProfileId = nextProfiles.length > 0 ? nextProfiles[0].id : undefined;
     await context.globalState.update(ACTIVE_PROFILE_STATE_KEY, nextActiveProfileId);
   }
+  refreshServerDefinitions();
 
   output.appendLine(`Deleted profile ${selectedProfile.name}.`);
   vscode.window.showInformationMessage(`Profile ${selectedProfile.name} deleted.`);
 }
 
-async function renameProfile(context: vscode.ExtensionContext, output: vscode.OutputChannel): Promise<void> {
-  await migrateLegacySettingsIfNeeded(context, output);
-
+async function renameProfile(
+  context: vscode.ExtensionContext,
+  output: vscode.OutputChannel,
+  refreshServerDefinitions: () => void
+): Promise<void> {
   const profiles = getProfiles(context);
   const selectedProfile = await promptForExistingProfile(
     profiles,
@@ -389,6 +430,7 @@ async function renameProfile(context: vscode.ExtensionContext, output: vscode.Ou
   });
 
   await saveProfiles(context, nextProfiles);
+  refreshServerDefinitions();
   output.appendLine(`Renamed profile ${selectedProfile.name} to ${renamedProfile}.`);
   vscode.window.showInformationMessage(`Profile renamed to ${renamedProfile}.`);
 }
@@ -397,14 +439,24 @@ async function getOrPromptTokenForProfile(
   context: vscode.ExtensionContext,
   profile: MistProfile
 ): Promise<string | undefined> {
-  const existing = await context.secrets.get(getProfileTokenSecretKey(profile.id));
-  if (existing && existing.trim().length > 0) {
-    return existing;
+  const secretKey = getProfileTokenSecretKey(profile.id);
+  const existing = await context.secrets.get(secretKey);
+  if (existing) {
+    const normalizedExisting = existing.trim();
+    if (normalizedExisting && isSafeHeaderValue(normalizedExisting)) {
+      return normalizedExisting;
+    }
+
+    // Drop invalid legacy/stale values so the user is prompted for a fresh token.
+    await context.secrets.delete(secretKey);
+    vscode.window.showWarningMessage(
+      `The stored token for profile ${profile.name} was invalid and has been removed. Please enter a new token.`
+    );
   }
 
   const token = await promptForToken();
   if (token) {
-    await context.secrets.store(getProfileTokenSecretKey(profile.id), token);
+    await context.secrets.store(secretKey, token);
   }
 
   return token;
@@ -414,8 +466,6 @@ async function getOrPromptActiveProfile(
   context: vscode.ExtensionContext,
   output: vscode.OutputChannel
 ): Promise<MistProfile | undefined> {
-  await migrateLegacySettingsIfNeeded(context, output);
-
   let profiles = getProfiles(context);
   if (profiles.length === 0) {
     const action = await vscode.window.showInformationMessage("No Mist MCP profile is configured.", "Configure Profile");
@@ -423,7 +473,9 @@ async function getOrPromptActiveProfile(
       return undefined;
     }
 
-    await configureProfile(context, output);
+    await configureProfile(context, output, () => {
+      // No refresh callback is needed in this helper path.
+    });
     profiles = getProfiles(context);
     if (profiles.length === 0) {
       return undefined;
@@ -576,20 +628,25 @@ async function promptForRenamedProfileName(
 
 async function promptForHost(defaultHost: string): Promise<string | undefined> {
   const validDefault = isAllowedMistHost(defaultHost) ? defaultHost : DEFAULT_MIST_HOST;
-  const host = await vscode.window.showQuickPick(MIST_HOST_OPTIONS, {
+  const hostItems: vscode.QuickPickItem[] = [
+    { label: validDefault, description: "Current" },
+    ...MIST_HOST_OPTIONS.filter((host) => host !== validDefault).map((host) => ({ label: host }))
+  ];
+  const selected = await vscode.window.showQuickPick(hostItems, {
     title: "Mist Host URL",
     placeHolder: "Mist Host URL (e.g. api.mist.com)",
-    ignoreFocusOut: true,
-    canPickMany: false
+    ignoreFocusOut: true
   });
 
-  if (!host) {
+  if (!selected) {
     return undefined;
   }
 
+  const host = selected.label;
+
   if (!isAllowedMistHost(host)) {
     vscode.window.showErrorMessage("Selected Mist host is not allowed.");
-    return validDefault;
+    return undefined;
   }
 
   return host;
@@ -666,12 +723,6 @@ function getProfileTokenSecretKey(profileId: string): string {
   return `${PROFILE_TOKEN_SECRET_PREFIX}${profileId}`;
 }
 
-function createProfileId(name: string): string {
-  const normalized = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
-  const suffix = Date.now().toString(36);
-  return `${normalized || "profile"}-${suffix}`;
-}
-
 async function migrateLegacySettingsIfNeeded(
   context: vscode.ExtensionContext,
   output: vscode.OutputChannel
@@ -686,6 +737,16 @@ async function migrateLegacySettingsIfNeeded(
     return;
   }
 
+  const normalizedLegacyToken = legacyToken.trim();
+  if (!isSafeHeaderValue(normalizedLegacyToken)) {
+    output.appendLine("Skipped legacy token migration because the stored value contains invalid characters.");
+    await context.secrets.delete(LEGACY_TOKEN_SECRET_KEY);
+    vscode.window.showWarningMessage(
+      "A legacy Mist MCP token was invalid and has been removed. Reconfigure your token before using MCP."
+    );
+    return;
+  }
+
   const legacyHost = context.globalState.get<string>(LEGACY_HOST_STATE_KEY);
   const host = legacyHost && isAllowedMistHost(legacyHost) ? legacyHost : DEFAULT_MIST_HOST;
   const migratedProfile: MistProfile = {
@@ -696,38 +757,27 @@ async function migrateLegacySettingsIfNeeded(
 
   await saveProfiles(context, [migratedProfile]);
   await context.globalState.update(ACTIVE_PROFILE_STATE_KEY, migratedProfile.id);
-  await context.secrets.store(getProfileTokenSecretKey(migratedProfile.id), legacyToken.trim());
+  await context.secrets.store(getProfileTokenSecretKey(migratedProfile.id), normalizedLegacyToken);
   await context.secrets.delete(LEGACY_TOKEN_SECRET_KEY);
   await context.globalState.update(LEGACY_HOST_STATE_KEY, undefined);
   output.appendLine("Migrated legacy Mist MCP configuration to profile-based settings.");
 }
 
-function isSafeHeaderValue(input: string): boolean {
-  return !/[\r\n\x00-\x1F\x7F]/.test(input);
+function getActiveProfile(context: vscode.ExtensionContext): MistProfile | undefined {
+  const activeProfileId = context.globalState.get<string>(ACTIVE_PROFILE_STATE_KEY);
+  if (!activeProfileId) {
+    return undefined;
+  }
+
+  const profiles = getProfiles(context);
+  return profiles.find((profile) => profile.id === activeProfileId);
 }
 
-function getProfileNameValidationError(value: string, existingNames: Set<string>): string | undefined {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return "Profile name cannot be empty.";
+function getServerLabel(context: vscode.ExtensionContext): string {
+  const activeProfile = getActiveProfile(context);
+  if (!activeProfile) {
+    return `${SERVER_LABEL} (No active profile)`;
   }
 
-  if (trimmed.length > PROFILE_NAME_MAX_LENGTH) {
-    return `Profile name must be ${PROFILE_NAME_MAX_LENGTH} characters or fewer.`;
-  }
-
-  if (!PROFILE_NAME_PATTERN.test(trimmed)) {
-    return "Use letters, numbers, spaces, dot, underscore, or hyphen. Name must start with a letter or number.";
-  }
-
-  const lowered = trimmed.toLowerCase();
-  if (RESERVED_PROFILE_NAMES.has(lowered)) {
-    return "This profile name is reserved.";
-  }
-
-  if (existingNames.has(lowered)) {
-    return "A profile with this name already exists.";
-  }
-
-  return undefined;
+  return `${SERVER_LABEL} (${activeProfile.name})`;
 }
