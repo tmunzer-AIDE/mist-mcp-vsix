@@ -75,6 +75,7 @@ interface RepoSkillFiles {
 }
 
 type StoredTokenValidationResult = "valid" | "missing" | "malformed" | "invalid";
+type PromptedTokenResult = { token?: string; reason: "ok" | "missing" | "validation_failed" };
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Mist MCP Provider");
@@ -112,17 +113,17 @@ export function activate(context: vscode.ExtensionContext): void {
         return undefined;
       }
 
-      const token = await getOrPromptTokenForProfile(context, profile, output);
-      if (!token) {
+      const tokenResult = await getOrPromptTokenForProfile(context, profile, output);
+      if (!tokenResult.token) {
         output.appendLine("MCP resolve cancelled: token is missing.");
-        vscode.window.showWarningMessage(
-          "Mist MCP server was not started because no API token was provided or the token failed validation."
-        );
+        if (tokenResult.reason === "missing") {
+          vscode.window.showWarningMessage("Mist MCP server was not started because no API token was provided.");
+        }
         return undefined;
       }
 
       server.headers = {
-        Authorization: `Bearer ${token}`,
+        Authorization: `Bearer ${tokenResult.token}`,
         "X-Mist-Base-URL": profile.host
       };
 
@@ -272,7 +273,6 @@ async function configureProfile(
 
     const isValidToken = await validateTokenForHost(host, token, output);
     if (!isValidToken) {
-      vscode.window.showWarningMessage("Configuration cancelled: token is invalid for the selected cloud.");
       return;
     }
 
@@ -317,7 +317,6 @@ async function configureProfile(
   if (token) {
     const isValidToken = await validateTokenForHost(host, token, output);
     if (!isValidToken) {
-      vscode.window.showWarningMessage("Configuration cancelled: token is invalid for the selected cloud.");
       return;
     }
 
@@ -338,8 +337,6 @@ async function configureProfile(
         );
         return;
       }
-
-      vscode.window.showWarningMessage("Configuration cancelled: existing token is invalid for the selected cloud.");
       return;
     }
   }
@@ -446,7 +443,6 @@ async function editProfile(
   if (token) {
     const isValidToken = await validateTokenForHost(host, token, output);
     if (!isValidToken) {
-      vscode.window.showWarningMessage("Edit cancelled: token is invalid for the selected cloud.");
       return;
     }
 
@@ -461,8 +457,6 @@ async function editProfile(
         );
         return;
       }
-
-      vscode.window.showWarningMessage("Edit cancelled: existing token is invalid for the selected cloud.");
       return;
     }
   }
@@ -575,13 +569,13 @@ async function getOrPromptTokenForProfile(
   context: vscode.ExtensionContext,
   profile: MistProfile,
   output: vscode.OutputChannel
-): Promise<string | undefined> {
+): Promise<PromptedTokenResult> {
   const secretKey = getProfileTokenSecretKey(profile.id);
   const existing = await context.secrets.get(secretKey);
   if (existing) {
     const normalizedExisting = existing.trim();
     if (normalizedExisting && isSafeHeaderValue(normalizedExisting)) {
-      return normalizedExisting;
+      return { token: normalizedExisting, reason: "ok" };
     }
 
     // Drop invalid legacy/stale values so the user is prompted for a fresh token.
@@ -593,17 +587,17 @@ async function getOrPromptTokenForProfile(
 
   const token = await promptForToken();
   if (!token) {
-    return undefined;
+    return { reason: "missing" };
   }
 
   const isValidToken = await validateTokenForHost(profile.host, token, output);
   if (!isValidToken) {
-    return undefined;
+    return { reason: "validation_failed" };
   }
 
   await context.secrets.store(secretKey, token);
 
-  return token;
+  return { token, reason: "ok" };
 }
 
 async function validateTokenForHost(
@@ -896,14 +890,15 @@ function getProfiles(context: vscode.ExtensionContext): MistProfile[] {
       continue;
     }
 
+    const normalizedId = profile.id.trim();
     const normalizedName = profile.name.trim();
     const normalizedHost = profile.host.trim();
-    if (!normalizedName || !isAllowedMistHost(normalizedHost)) {
+    if (!normalizedId || !normalizedName || !isAllowedMistHost(normalizedHost)) {
       continue;
     }
 
     profiles.push({
-      id: profile.id,
+      id: normalizedId,
       name: normalizedName,
       host: normalizedHost
     });
@@ -1091,20 +1086,35 @@ async function removeInstalledSkills(context: vscode.ExtensionContext, output: v
   }
 
   let removalError: unknown;
-  try {
-    for (const skillName of state.installedSkillNames) {
+  const removedSkillNames = new Set<string>();
+  for (const skillName of state.installedSkillNames) {
+    try {
       const skillPath = resolveSkillPathWithinRoot(target.destinationRoot, skillName);
       await fs.rm(skillPath, { recursive: true, force: true });
+      removedSkillNames.add(skillName);
+    } catch (error) {
+      removalError ??= error;
+      const details = error instanceof Error ? error.message : String(error);
+      output.appendLine(`Managed skill removal failed for ${skillName}: ${details}`);
     }
-  } catch (error) {
-    removalError = error;
-    const details = error instanceof Error ? error.message : String(error);
-    output.appendLine(`Managed skill removal encountered an error: ${details}`);
+  }
+
+  if (removalError) {
+    const details = removalError instanceof Error ? removalError.message : String(removalError);
     vscode.window.showErrorMessage(`Failed to remove one or more managed skills: ${details}`);
   }
 
+  const remainingSkillNames = state.installedSkillNames.filter((name) => !removedSkillNames.has(name));
+  const nextState = remainingSkillNames.length > 0
+    ? {
+      ...state,
+      installedSkillNames: remainingSkillNames,
+      installedAt: new Date().toISOString()
+    }
+    : undefined;
+
   try {
-    await getManagedSkillsStorage(context, target.scope).update(getManagedSkillsStateKey(target.scope), undefined);
+    await getManagedSkillsStorage(context, target.scope).update(getManagedSkillsStateKey(target.scope), nextState);
   } catch (error) {
     const details = error instanceof Error ? error.message : String(error);
     output.appendLine(`Failed to clear managed skills state for ${target.scope}: ${details}`);
@@ -1113,6 +1123,9 @@ async function removeInstalledSkills(context: vscode.ExtensionContext, output: v
   }
 
   if (removalError) {
+    output.appendLine(
+      `Managed skill removal completed with errors. ${remainingSkillNames.length} skill(s) remain tracked in state.`
+    );
     return;
   }
 
@@ -1330,11 +1343,21 @@ async function fetchGitHubTree(
     signal: createFetchAbortSignal(syncSignal, GITHUB_FETCH_TIMEOUT_MS)
   });
 
-  const body = (await response.json()) as GitHubTreeResponse;
   if (!response.ok) {
-    const message = typeof body?.message === "string" ? body.message : response.statusText;
+    let message = response.statusText;
+    try {
+      const errBody = (await response.json()) as GitHubTreeResponse;
+      if (typeof errBody?.message === "string") {
+        message = errBody.message;
+      }
+    } catch {
+      // Ignore non-JSON error responses and keep statusText.
+    }
+
     throw new Error(`GitHub API error ${response.status}: ${message}`);
   }
+
+  const body = (await response.json()) as GitHubTreeResponse;
 
   if (!Array.isArray(body.tree)) {
     throw new Error("GitHub tree response did not include file entries.");
