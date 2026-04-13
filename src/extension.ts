@@ -601,7 +601,7 @@ async function validateTokenForHost(
       method: "GET",
       headers: {
         Accept: "application/json",
-        Authorization: `Token ${token}`
+        Authorization: `Token ${token}` // Mist API only accepts "Token" scheme, not "Bearer"
       },
       signal: AbortSignal.timeout(TOKEN_VALIDATION_TIMEOUT_MS)
     });
@@ -987,45 +987,17 @@ async function installSkillsFromRepo(context: vscode.ExtensionContext, output: v
     return;
   }
 
-  const existingState = getManagedSkillsState(context, target.scope);
-  output.appendLine(`Using fixed skills source: ${FIXED_SKILLS_REPO_URL}.`);
-
-  const ref = await vscode.window.showInputBox({
-    title: "Repository Ref",
-    prompt: "Branch, tag, or commit to install from",
-    value: existingState?.ref ?? DEFAULT_SKILLS_REF,
-    ignoreFocusOut: true,
-    validateInput: (value) => {
-      if (!value.trim()) {
-        return "Ref cannot be empty.";
-      }
-
-      return undefined;
-    }
-  });
-
-  if (!ref || !ref.trim()) {
-    return;
-  }
-
-  const pathPrefix = await vscode.window.showInputBox({
-    title: "Skills Path In Repository",
-    prompt: "Optional subfolder path that contains skill folders (leave empty for repo root scan)",
-    value: existingState?.pathPrefix ?? DEFAULT_SKILLS_PATH_PREFIX,
-    ignoreFocusOut: true
-  });
-
-  if (pathPrefix === undefined) {
-    return;
-  }
+  output.appendLine(
+    `Using fixed skills source: ${FIXED_SKILLS_REPO_URL}@${DEFAULT_SKILLS_REF} (repository root).`
+  );
 
   await syncSkillsFromGitHub({
     context,
     output,
     target,
     repoSpec: FIXED_SKILLS_REPO_SPEC,
-    ref: ref.trim(),
-    pathPrefix: pathPrefix.trim(),
+    ref: DEFAULT_SKILLS_REF,
+    pathPrefix: DEFAULT_SKILLS_PATH_PREFIX,
     mode: "install"
   });
 }
@@ -1057,14 +1029,15 @@ async function updateInstalledSkills(context: vscode.ExtensionContext, output: v
     );
   }
 
-  const requestedRef = state.ref.trim();
-  const resolvedRef = requestedRef || DEFAULT_SKILLS_REF;
-  if (!requestedRef) {
+  if (state.ref.trim() && state.ref.trim() !== DEFAULT_SKILLS_REF) {
     output.appendLine(
-      `Stored skills ref for ${target.scope} scope was empty; falling back to default ref ${DEFAULT_SKILLS_REF}.`
+      `Ignoring stored skills ref ${state.ref.trim()} and using fixed ref ${DEFAULT_SKILLS_REF}.`
     );
-    vscode.window.showInformationMessage(
-      `Stored skills ref was empty. Falling back to default ref ${DEFAULT_SKILLS_REF}.`
+  }
+
+  if (state.pathPrefix.trim()) {
+    output.appendLine(
+      `Ignoring stored skills path prefix ${state.pathPrefix.trim()} and using repository root.`
     );
   }
 
@@ -1073,8 +1046,8 @@ async function updateInstalledSkills(context: vscode.ExtensionContext, output: v
     output,
     target,
     repoSpec: FIXED_SKILLS_REPO_SPEC,
-    ref: resolvedRef,
-    pathPrefix: state.pathPrefix.trim(),
+    ref: DEFAULT_SKILLS_REF,
+    pathPrefix: DEFAULT_SKILLS_PATH_PREFIX,
     mode: "update",
     existingState: state
   });

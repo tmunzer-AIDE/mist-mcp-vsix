@@ -111,9 +111,9 @@ You can install those skills into either:
 1. Open Command Palette.
 2. Run `Mist MCP: Install Skills From Repo`.
 3. Choose install target (`Workspace` or `Global`).
-4. Enter ref (branch/tag/commit) and optional subfolder path.
 
 The extension scans the repo for folders that contain `SKILL.md` and installs each discovered skill folder.
+It always uses branch `main` and scans from the repository root.
 
 ### Update installed skills
 
@@ -121,7 +121,7 @@ The extension scans the repo for folders that contain `SKILL.md` and installs ea
 2. Run `Mist MCP: Update Installed Skills`.
 3. Choose the managed install target to refresh.
 
-Updates reuse the previously saved ref/path settings and always pull from `https://github.com/tmunzer-AIDE/mist-skills`.
+Updates always pull from `https://github.com/tmunzer-AIDE/mist-skills` on branch `main` and repository root.
 
 ### Remove installed skills
 
