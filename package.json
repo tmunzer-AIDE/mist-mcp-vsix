@@ -3,7 +3,7 @@
   "displayName": "Mist MCP Provider",
   "description": "Provides a preconfigured Mist MCP server for VS Code.",
   "icon": "media/icon.png",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "publisher": "tmunzer",
   "repository": {
     "type": "git",
@@ -61,6 +61,18 @@
       {
         "command": "mistMcpProvider.clearToken",
         "title": "Mist MCP: Clear Active Profile Token"
+      },
+      {
+        "command": "mistMcpProvider.installSkills",
+        "title": "Mist MCP: Install Skills From Repo"
+      },
+      {
+        "command": "mistMcpProvider.updateSkills",
+        "title": "Mist MCP: Update Installed Skills"
+      },
+      {
+        "command": "mistMcpProvider.removeSkills",
+        "title": "Mist MCP: Remove Installed Skills"
       }
     ],
     "mcpServerDefinitionProviders": [

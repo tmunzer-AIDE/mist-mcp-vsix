@@ -45,6 +45,9 @@ Default host is `https://api.mist.com`.
 - `Mist MCP: Rename Profile`
 - `Mist MCP: Show Active Profile`
 - `Mist MCP: Clear Active Profile Token`
+- `Mist MCP: Install Skills From Repo`
+- `Mist MCP: Update Installed Skills`
+- `Mist MCP: Remove Installed Skills`
 
 ## Configure and Use
 
@@ -89,6 +92,42 @@ You can also run `Mist MCP: Show Active Profile` from the Command Palette.
 - Run `Mist MCP: Delete Profile` to remove one profile and its stored token.
 - Run `Mist MCP: Rename Profile` to rename one profile.
 - Run `Mist MCP: Clear Active Profile Token` to remove only the active profile token.
+
+## Skills Management
+
+Skills are loaded only from this repository:
+
+- `https://github.com/tmunzer-AIDE/mist-skills`
+
+You can install those skills into either:
+
+- Workspace scope: `.github/skills`
+- Personal scope: `~/.copilot/skills`
+
+### Install skills from a repo
+
+1. Open Command Palette.
+2. Run `Mist MCP: Install Skills From Repo`.
+3. Choose install target (`Workspace` or `Global`).
+4. Enter ref (branch/tag/commit) and optional subfolder path.
+
+The extension scans the repo for folders that contain `SKILL.md` and installs each discovered skill folder.
+
+### Update installed skills
+
+1. Open Command Palette.
+2. Run `Mist MCP: Update Installed Skills`.
+3. Choose the managed install target to refresh.
+
+Updates reuse the previously saved ref/path settings and always pull from `https://github.com/tmunzer-AIDE/mist-skills`.
+
+### Remove installed skills
+
+1. Open Command Palette.
+2. Run `Mist MCP: Remove Installed Skills`.
+3. Choose the managed install target to remove.
+
+This removes only skill folders previously installed by this extension for that target.
 
 ## Development
 

@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.2.4 - 2026-04-13
+
+- Added commands to install, update, and remove Copilot skills from a GitHub repository from `https://github.com/tmunzer-AIDE/mist-skills`.
+- Added support for both workspace skill installs (`.github/skills`) and personal/global installs (`~/.copilot/skills`).
+- Added managed install metadata so updates/removals only affect skill folders installed by this extension.
+
 ## 0.2.3 - 2026-04-13
 
 - Triggered MCP server definition refresh when clearing the active profile token to force header re-resolution.

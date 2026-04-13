@@ -1,4 +1,7 @@
 import * as vscode from "vscode";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
   DEFAULT_MIST_HOST,
   isAllowedMistHost,
@@ -6,6 +9,12 @@ import {
   MIST_SERVER_URI
 } from "./hosts";
 import { createProfileId, getProfileNameValidationError, isSafeHeaderValue } from "./profile-utils";
+import {
+  collectSkillDirectories,
+  formatGitHubRepoSpecifier,
+  getSkillNameFromDirectory,
+  type GitHubRepoSpec
+} from "./skills-utils";
 
 const PROVIDER_ID = "mist.mcp.provider";
 const SERVER_LABEL = "Mist MCP Server";
@@ -14,6 +23,14 @@ const LEGACY_HOST_STATE_KEY = "mist.hostUrl";
 const PROFILES_STATE_KEY = "mist.profiles";
 const ACTIVE_PROFILE_STATE_KEY = "mist.activeProfile";
 const PROFILE_TOKEN_SECRET_PREFIX = "mist.profileToken.";
+const MANAGED_SKILLS_STATE_PREFIX = "mist.managedSkills.";
+const FIXED_SKILLS_REPO_URL = "https://github.com/tmunzer-AIDE/mist-skills";
+const FIXED_SKILLS_REPO_SPEC: GitHubRepoSpec = {
+  owner: "tmunzer-AIDE",
+  repo: "mist-skills"
+};
+const DEFAULT_SKILLS_REF = "main";
+const DEFAULT_SKILLS_PATH_PREFIX = "";
 
 interface MistProfile {
   id: string;
@@ -23,6 +40,34 @@ interface MistProfile {
 
 interface ProfileQuickPickItem extends vscode.QuickPickItem {
   profileId: string;
+}
+
+type SkillsInstallScope = "workspace" | "global";
+
+interface SkillsTarget {
+  scope: SkillsInstallScope;
+  destinationRoot: string;
+  displayPath: string;
+}
+
+interface ManagedSkillsState {
+  repo: string;
+  ref: string;
+  pathPrefix: string;
+  installedSkillNames: string[];
+  installedAt: string;
+}
+
+interface GitHubTreeResponse {
+  tree?: Array<{ path?: string; type?: string }>;
+  truncated?: boolean;
+  message?: string;
+}
+
+interface RepoSkillFiles {
+  skillName: string;
+  skillDirectory: string;
+  filePaths: string[];
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -140,6 +185,24 @@ export function activate(context: vscode.ExtensionContext): void {
       refreshServerDefinitions();
       output.appendLine(`Stored Mist API token cleared for profile ${profile.name}.`);
       vscode.window.showInformationMessage(`Stored token cleared for profile ${profile.name}.`);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("mistMcpProvider.installSkills", async () => {
+      await installSkillsFromRepo(context, output);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("mistMcpProvider.updateSkills", async () => {
+      await updateInstalledSkills(context, output);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("mistMcpProvider.removeSkills", async () => {
+      await removeInstalledSkills(context, output);
     })
   );
 
@@ -722,6 +785,520 @@ async function saveProfiles(context: vscode.ExtensionContext, profiles: MistProf
 
 function getProfileTokenSecretKey(profileId: string): string {
   return `${PROFILE_TOKEN_SECRET_PREFIX}${profileId}`;
+}
+
+async function installSkillsFromRepo(context: vscode.ExtensionContext, output: vscode.OutputChannel): Promise<void> {
+  const target = await promptForSkillsTarget(["workspace", "global"], {
+    title: "Install Mist Skills",
+    placeHolder: "Choose where to install skills"
+  });
+  if (!target) {
+    return;
+  }
+
+  const existingState = getManagedSkillsState(context, target.scope);
+  output.appendLine(`Using fixed skills source: ${FIXED_SKILLS_REPO_URL}.`);
+
+  const ref = await vscode.window.showInputBox({
+    title: "Repository Ref",
+    prompt: "Branch, tag, or commit to install from",
+    value: existingState?.ref ?? DEFAULT_SKILLS_REF,
+    ignoreFocusOut: true,
+    validateInput: (value) => {
+      if (!value.trim()) {
+        return "Ref cannot be empty.";
+      }
+
+      return undefined;
+    }
+  });
+
+  if (!ref || !ref.trim()) {
+    return;
+  }
+
+  const pathPrefix = await vscode.window.showInputBox({
+    title: "Skills Path In Repository",
+    prompt: "Optional subfolder path that contains skill folders (leave empty for repo root scan)",
+    value: existingState?.pathPrefix ?? DEFAULT_SKILLS_PATH_PREFIX,
+    ignoreFocusOut: true
+  });
+
+  if (pathPrefix === undefined) {
+    return;
+  }
+
+  await syncSkillsFromGitHub({
+    context,
+    output,
+    target,
+    repoSpec: FIXED_SKILLS_REPO_SPEC,
+    ref: ref.trim(),
+    pathPrefix: pathPrefix.trim(),
+    mode: "install"
+  });
+}
+
+async function updateInstalledSkills(context: vscode.ExtensionContext, output: vscode.OutputChannel): Promise<void> {
+  const availableScopes = getManagedSkillScopes(context);
+  if (availableScopes.length === 0) {
+    vscode.window.showInformationMessage("No managed skills are installed yet.");
+    return;
+  }
+
+  const target = await promptForSkillsTarget(availableScopes, {
+    title: "Update Installed Skills",
+    placeHolder: "Choose which managed install to update"
+  });
+  if (!target) {
+    return;
+  }
+
+  const state = getManagedSkillsState(context, target.scope);
+  if (!state) {
+    vscode.window.showWarningMessage("No managed skill metadata found for the selected target.");
+    return;
+  }
+
+  if (state.repo !== formatGitHubRepoSpecifier(FIXED_SKILLS_REPO_SPEC)) {
+    output.appendLine(
+      `Ignoring previously stored skills source ${state.repo} and using fixed source ${FIXED_SKILLS_REPO_URL}.`
+    );
+  }
+
+  await syncSkillsFromGitHub({
+    context,
+    output,
+    target,
+    repoSpec: FIXED_SKILLS_REPO_SPEC,
+    ref: state.ref.trim() || DEFAULT_SKILLS_REF,
+    pathPrefix: state.pathPrefix.trim(),
+    mode: "update",
+    existingState: state
+  });
+}
+
+async function removeInstalledSkills(context: vscode.ExtensionContext, output: vscode.OutputChannel): Promise<void> {
+  const availableScopes = getManagedSkillScopes(context);
+  if (availableScopes.length === 0) {
+    vscode.window.showInformationMessage("No managed skills are installed yet.");
+    return;
+  }
+
+  const target = await promptForSkillsTarget(availableScopes, {
+    title: "Remove Installed Skills",
+    placeHolder: "Choose which managed install to remove"
+  });
+  if (!target) {
+    return;
+  }
+
+  const state = getManagedSkillsState(context, target.scope);
+  if (!state || state.installedSkillNames.length === 0) {
+    vscode.window.showInformationMessage("No managed skills are tracked for the selected target.");
+    return;
+  }
+
+  const confirmed = await vscode.window.showWarningMessage(
+    `Remove ${state.installedSkillNames.length} managed skill(s) from ${target.displayPath}?`,
+    { modal: true },
+    "Remove"
+  );
+
+  if (confirmed !== "Remove") {
+    return;
+  }
+
+  for (const skillName of state.installedSkillNames) {
+    const skillPath = path.join(target.destinationRoot, skillName);
+    await fs.rm(skillPath, { recursive: true, force: true });
+  }
+
+  await context.globalState.update(getManagedSkillsStateKey(target.scope), undefined);
+  output.appendLine(
+    `Removed ${state.installedSkillNames.length} managed skill(s) from ${target.displayPath} (${target.scope}).`
+  );
+  vscode.window.showInformationMessage(`Removed ${state.installedSkillNames.length} managed skill(s).`);
+}
+
+async function syncSkillsFromGitHub(options: {
+  context: vscode.ExtensionContext;
+  output: vscode.OutputChannel;
+  target: SkillsTarget;
+  repoSpec: GitHubRepoSpec;
+  ref: string;
+  pathPrefix: string;
+  mode: "install" | "update";
+  existingState?: ManagedSkillsState;
+}): Promise<void> {
+  const { context, output, target, repoSpec, ref, pathPrefix, mode, existingState } = options;
+  const repoLabel = formatGitHubRepoSpecifier(repoSpec);
+
+  let repoSkills: RepoSkillFiles[];
+  try {
+    repoSkills = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: mode === "install" ? "Installing skills" : "Updating skills",
+        cancellable: false
+      },
+      async (progress) => {
+        progress.report({ message: `Reading repository tree for ${repoLabel}@${ref}...` });
+        const treeEntries = await fetchGitHubTree(repoSpec, ref, output);
+        const skills = getRepoSkillFiles(treeEntries, pathPrefix);
+        return skills;
+      }
+    );
+  } catch (error) {
+    const details = error instanceof Error ? error.message : String(error);
+    output.appendLine(`Skill sync failed while reading ${repoLabel}@${ref}: ${details}`);
+    vscode.window.showErrorMessage(`Unable to read skills from ${repoLabel}@${ref}: ${details}`);
+    return;
+  }
+
+  const skillNames = repoSkills.map((skill) => skill.skillName);
+  const installedSet = new Set(skillNames);
+  const previousSkills = existingState?.installedSkillNames ?? getManagedSkillsState(context, target.scope)?.installedSkillNames ?? [];
+  const obsoleteManagedSkills = previousSkills.filter((name) => !installedSet.has(name));
+  const overwriteSkills = await getExistingSkillNames(target.destinationRoot, skillNames);
+
+  if (overwriteSkills.length > 0 || obsoleteManagedSkills.length > 0) {
+    const overwriteText = overwriteSkills.length > 0
+      ? `replace ${overwriteSkills.length} existing skill folder(s)`
+      : undefined;
+    const removeText = obsoleteManagedSkills.length > 0
+      ? `remove ${obsoleteManagedSkills.length} previously managed skill folder(s)`
+      : undefined;
+    const actionText = [overwriteText, removeText].filter((part): part is string => Boolean(part)).join(" and ");
+
+    const confirmed = await vscode.window.showWarningMessage(
+      `This operation will ${actionText} in ${target.displayPath}. Continue?`,
+      { modal: true },
+      "Continue"
+    );
+
+    if (confirmed !== "Continue") {
+      return;
+    }
+  }
+
+  try {
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: mode === "install" ? "Installing skills" : "Updating skills",
+        cancellable: false
+      },
+      async (progress) => {
+        await fs.mkdir(target.destinationRoot, { recursive: true });
+
+        let index = 0;
+        for (const skill of repoSkills) {
+          index += 1;
+          progress.report({ message: `Syncing ${skill.skillName} (${index}/${repoSkills.length})` });
+          await writeSkillFromRepo(target.destinationRoot, repoSpec, ref, skill);
+        }
+
+        for (const skillName of obsoleteManagedSkills) {
+          await fs.rm(path.join(target.destinationRoot, skillName), { recursive: true, force: true });
+        }
+      }
+    );
+  } catch (error) {
+    const details = error instanceof Error ? error.message : String(error);
+    output.appendLine(`Skill sync failed while writing files: ${details}`);
+    vscode.window.showErrorMessage(`Skill installation failed: ${details}`);
+    return;
+  }
+
+  const nextState: ManagedSkillsState = {
+    repo: repoLabel,
+    ref,
+    pathPrefix,
+    installedSkillNames: skillNames,
+    installedAt: new Date().toISOString()
+  };
+
+  await context.globalState.update(getManagedSkillsStateKey(target.scope), nextState);
+  output.appendLine(
+    `${mode === "install" ? "Installed" : "Updated"} ${skillNames.length} managed skill(s) from ${repoLabel}@${ref} to ${target.displayPath} (${target.scope}).`
+  );
+  vscode.window.showInformationMessage(
+    `${mode === "install" ? "Installed" : "Updated"} ${skillNames.length} skill(s) in ${target.displayPath}.`
+  );
+}
+
+async function fetchGitHubTree(
+  repoSpec: GitHubRepoSpec,
+  ref: string,
+  output: vscode.OutputChannel
+): Promise<Array<{ path: string; type: string }>> {
+  const treeUrl = new URL(
+    `https://api.github.com/repos/${repoSpec.owner}/${repoSpec.repo}/git/trees/${encodeURIComponent(ref)}`
+  );
+  treeUrl.searchParams.set("recursive", "1");
+
+  const response = await fetch(treeUrl.toString(), {
+    headers: {
+      Accept: "application/vnd.github+json",
+      "User-Agent": "mist-mcp-provider"
+    }
+  });
+
+  const body = (await response.json()) as GitHubTreeResponse;
+  if (!response.ok) {
+    const message = typeof body?.message === "string" ? body.message : response.statusText;
+    throw new Error(`GitHub API error ${response.status}: ${message}`);
+  }
+
+  if (!Array.isArray(body.tree)) {
+    throw new Error("GitHub tree response did not include file entries.");
+  }
+
+  if (body.truncated) {
+    output.appendLine(
+      `GitHub tree for ${formatGitHubRepoSpecifier(repoSpec)}@${ref} is truncated; only partial file listing is available.`
+    );
+  }
+
+  const entries: Array<{ path: string; type: string }> = [];
+  for (const entry of body.tree) {
+    if (typeof entry.path !== "string" || typeof entry.type !== "string") {
+      continue;
+    }
+
+    entries.push({ path: entry.path, type: entry.type });
+  }
+
+  return entries;
+}
+
+function getRepoSkillFiles(treeEntries: Array<{ path: string; type: string }>, pathPrefix: string): RepoSkillFiles[] {
+  const skillDirectories = collectSkillDirectories(treeEntries, pathPrefix);
+  if (skillDirectories.length === 0) {
+    throw new Error(
+      pathPrefix
+        ? `No SKILL.md files were found under "${pathPrefix}".`
+        : "No SKILL.md files were found in the repository."
+    );
+  }
+
+  const skills = skillDirectories.map((skillDirectory): RepoSkillFiles => {
+    const filePrefix = `${skillDirectory}/`;
+    const filePaths = treeEntries
+      .filter((entry) => entry.type === "blob" && entry.path.startsWith(filePrefix))
+      .map((entry) => entry.path)
+      .sort((left, right) => left.localeCompare(right));
+
+    return {
+      skillName: getSkillNameFromDirectory(skillDirectory),
+      skillDirectory,
+      filePaths
+    };
+  });
+
+  const seen = new Map<string, string>();
+  for (const skill of skills) {
+    const duplicateSource = seen.get(skill.skillName);
+    if (duplicateSource) {
+      throw new Error(
+        `Duplicate skill name "${skill.skillName}" found in ${duplicateSource} and ${skill.skillDirectory}.`
+      );
+    }
+
+    seen.set(skill.skillName, skill.skillDirectory);
+  }
+
+  return skills.sort((left, right) => left.skillName.localeCompare(right.skillName));
+}
+
+async function writeSkillFromRepo(
+  destinationRoot: string,
+  repoSpec: GitHubRepoSpec,
+  ref: string,
+  skill: RepoSkillFiles
+): Promise<void> {
+  const destinationSkillPath = path.join(destinationRoot, skill.skillName);
+  await fs.rm(destinationSkillPath, { recursive: true, force: true });
+  await fs.mkdir(destinationSkillPath, { recursive: true });
+
+  const filePrefix = `${skill.skillDirectory}/`;
+  for (const repoPath of skill.filePaths) {
+    if (!repoPath.startsWith(filePrefix)) {
+      continue;
+    }
+
+    const relativePath = repoPath.slice(filePrefix.length);
+    const safeSegments = getSafePathSegments(relativePath);
+    if (!safeSegments) {
+      throw new Error(`Invalid file path in repository: ${repoPath}`);
+    }
+
+    const destinationPath = path.join(destinationSkillPath, ...safeSegments);
+    const destinationParent = path.dirname(destinationPath);
+    await fs.mkdir(destinationParent, { recursive: true });
+
+    const fileBytes = await fetchGitHubRawFile(repoSpec, ref, repoPath);
+    await fs.writeFile(destinationPath, fileBytes);
+  }
+}
+
+async function fetchGitHubRawFile(repoSpec: GitHubRepoSpec, ref: string, repoPath: string): Promise<Buffer> {
+  const encodedRef = encodeURIComponent(ref);
+  const encodedPath = repoPath
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  const rawUrl = `https://raw.githubusercontent.com/${repoSpec.owner}/${repoSpec.repo}/${encodedRef}/${encodedPath}`;
+
+  const response = await fetch(rawUrl, {
+    headers: {
+      "User-Agent": "mist-mcp-provider"
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to download ${repoPath} (${response.status} ${response.statusText}).`);
+  }
+
+  const bytes = await response.arrayBuffer();
+  return Buffer.from(bytes);
+}
+
+function getSafePathSegments(relativePath: string): string[] | undefined {
+  const segments = relativePath.split("/").filter((segment) => segment.length > 0);
+  if (segments.length === 0) {
+    return undefined;
+  }
+
+  for (const segment of segments) {
+    if (segment === "." || segment === "..") {
+      return undefined;
+    }
+  }
+
+  return segments;
+}
+
+function getManagedSkillsState(context: vscode.ExtensionContext, scope: SkillsInstallScope): ManagedSkillsState | undefined {
+  const raw = context.globalState.get<unknown>(getManagedSkillsStateKey(scope));
+  if (!raw || typeof raw !== "object") {
+    return undefined;
+  }
+
+  const candidate = raw as Partial<ManagedSkillsState>;
+  if (
+    typeof candidate.repo !== "string" ||
+    typeof candidate.ref !== "string" ||
+    typeof candidate.pathPrefix !== "string" ||
+    !Array.isArray(candidate.installedSkillNames) ||
+    typeof candidate.installedAt !== "string"
+  ) {
+    return undefined;
+  }
+
+  const installedSkillNames = candidate.installedSkillNames.filter((name): name is string => typeof name === "string");
+
+  return {
+    repo: candidate.repo,
+    ref: candidate.ref,
+    pathPrefix: candidate.pathPrefix,
+    installedSkillNames,
+    installedAt: candidate.installedAt
+  };
+}
+
+function getManagedSkillsStateKey(scope: SkillsInstallScope): string {
+  return `${MANAGED_SKILLS_STATE_PREFIX}${scope}`;
+}
+
+function getManagedSkillScopes(context: vscode.ExtensionContext): SkillsInstallScope[] {
+  const scopes: SkillsInstallScope[] = [];
+  const workspaceState = getManagedSkillsState(context, "workspace");
+  if (workspaceState && workspaceState.installedSkillNames.length > 0) {
+    scopes.push("workspace");
+  }
+
+  const globalState = getManagedSkillsState(context, "global");
+  if (globalState && globalState.installedSkillNames.length > 0) {
+    scopes.push("global");
+  }
+
+  return scopes;
+}
+
+async function promptForSkillsTarget(
+  scopes: SkillsInstallScope[],
+  options: { title: string; placeHolder: string }
+): Promise<SkillsTarget | undefined> {
+  const uniqueScopes = Array.from(new Set(scopes));
+  const targets = uniqueScopes
+    .map((scope) => resolveSkillsTarget(scope))
+    .filter((target): target is SkillsTarget => Boolean(target));
+
+  if (targets.length === 0) {
+    vscode.window.showWarningMessage("No valid destination is available for skills.");
+    return undefined;
+  }
+
+  if (targets.length === 1) {
+    return targets[0];
+  }
+
+  const selected = await vscode.window.showQuickPick(
+    targets.map((target) => ({
+      label: target.scope === "workspace" ? "Workspace" : "Global (User)",
+      description: target.displayPath,
+      target
+    })),
+    {
+      title: options.title,
+      placeHolder: options.placeHolder,
+      ignoreFocusOut: true
+    }
+  );
+
+  return selected?.target;
+}
+
+function resolveSkillsTarget(scope: SkillsInstallScope): SkillsTarget | undefined {
+  if (scope === "workspace") {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+      return undefined;
+    }
+
+    const destinationRoot = path.join(workspaceFolder.uri.fsPath, ".github", "skills");
+    return {
+      scope,
+      destinationRoot,
+      displayPath: destinationRoot
+    };
+  }
+
+  const destinationRoot = path.join(os.homedir(), ".copilot", "skills");
+  return {
+    scope,
+    destinationRoot,
+    displayPath: destinationRoot
+  };
+}
+
+async function getExistingSkillNames(destinationRoot: string, skillNames: string[]): Promise<string[]> {
+  const existing: string[] = [];
+  for (const skillName of skillNames) {
+    const skillPath = path.join(destinationRoot, skillName);
+    try {
+      const stat = await fs.stat(skillPath);
+      if (stat.isDirectory()) {
+        existing.push(skillName);
+      }
+    } catch {
+      // Path does not exist.
+    }
+  }
+
+  return existing;
 }
 
 async function migrateLegacySettingsIfNeeded(
