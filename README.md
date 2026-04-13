@@ -60,6 +60,7 @@ Default host is `https://api.mist.com`.
 5. Enter the profile token.
 
 Before saving a token, the extension validates it against `GET /api/v1/self` on the selected cloud host. If the token is invalid for that cloud, the UI shows an error and does not save the token.
+When validation fails, the token input reopens so you can retry immediately without restarting the command flow.
 
 The token is saved in VS Code Secret Storage and the host is saved in extension state.
 
@@ -95,6 +96,8 @@ You can also run `Mist MCP: Show Active Profile` from the Command Palette.
 - Run `Mist MCP: Rename Profile` to rename one profile.
 - Run `Mist MCP: Clear Active Profile Token` to remove only the active profile token.
 
+If you change the host but leave token input empty, the extension validates the currently stored token against the new cloud before saving the profile.
+
 ## Skills Management
 
 Skills are loaded only from this repository:
@@ -111,9 +114,10 @@ You can install those skills into either:
 1. Open Command Palette.
 2. Run `Mist MCP: Install Skills From Repo`.
 3. Choose install target (`Workspace` or `Global`).
-4. Enter ref (branch/tag/commit) and optional subfolder path.
 
 The extension scans the repo for folders that contain `SKILL.md` and installs each discovered skill folder.
+It always uses branch `main` and scans from the repository root.
+If existing managed skill folders will be replaced or removed, the extension asks for confirmation before continuing.
 
 ### Update installed skills
 
@@ -121,7 +125,7 @@ The extension scans the repo for folders that contain `SKILL.md` and installs ea
 2. Run `Mist MCP: Update Installed Skills`.
 3. Choose the managed install target to refresh.
 
-Updates reuse the previously saved ref/path settings and always pull from `https://github.com/tmunzer-AIDE/mist-skills`.
+Updates always pull from `https://github.com/tmunzer-AIDE/mist-skills` on branch `main` and repository root.
 
 ### Remove installed skills
 

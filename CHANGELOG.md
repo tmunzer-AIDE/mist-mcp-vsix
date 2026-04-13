@@ -5,6 +5,7 @@ All notable changes to this project are documented in this file.
 ## 0.2.4 - 2026-04-13
 
 - Added managed Skills commands to install, update, and remove Copilot skills from `https://github.com/tmunzer-AIDE/mist-skills`.
+- Simplified skills install/update flow to always use branch `main` and repository root (no ref/path prompts).
 - Added support for both workspace skill installs (`.github/skills`) and personal/global installs (`~/.copilot/skills`).
 - Added token verification against `GET /api/v1/self` before storing profile tokens, including cloud-specific validation messaging.
 - Added host-change safeguards that validate existing stored tokens against the newly selected cloud before profile updates are saved.
