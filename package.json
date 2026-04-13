@@ -1,0 +1,50 @@
+{
+  "name": "mist-mcp-provider",
+  "displayName": "Mist MCP Provider",
+  "description": "Provides a preconfigured Mist MCP server for VS Code.",
+  "icon": "media/icon.png",
+  "version": "0.1.2",
+  "publisher": "tmunzer",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.105.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "mistMcpProvider.configure",
+        "title": "Mist MCP: Configure Token and Host"
+      },
+      {
+        "command": "mistMcpProvider.clearToken",
+        "title": "Mist MCP: Clear Stored Token"
+      }
+    ],
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "mist.mcp.provider",
+        "label": "Mist MCP Server Provider"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node --test out/test/**/*.test.js",
+    "package": "vsce package --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.2",
+    "@types/vscode": "^1.105.0",
+    "@vscode/vsce": "^3.3.2",
+    "typescript": "^5.8.3"
+  }
+}
