@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.2.3 - 2026-04-13
+
+- Triggered MCP server definition refresh when clearing the active profile token to force header re-resolution.
+
 ## 0.2.2 - 2026-04-13
 
 - Fixed host picker behavior to preselect the current host while editing profiles.

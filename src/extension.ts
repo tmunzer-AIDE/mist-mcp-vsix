@@ -137,6 +137,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
 
       await context.secrets.delete(getProfileTokenSecretKey(profile.id));
+      refreshServerDefinitions();
       output.appendLine(`Stored Mist API token cleared for profile ${profile.name}.`);
       vscode.window.showInformationMessage(`Stored token cleared for profile ${profile.name}.`);
     })
