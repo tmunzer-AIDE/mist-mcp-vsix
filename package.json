@@ -3,7 +3,7 @@
   "displayName": "Mist MCP Provider",
   "description": "Provides a preconfigured Mist MCP server for VS Code.",
   "icon": "media/icon.png",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "publisher": "tmunzer",
   "license": "MIT",
   "engines": {
