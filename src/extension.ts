@@ -13,11 +13,18 @@ const LEGACY_HOST_STATE_KEY = "mist.hostUrl";
 const PROFILES_STATE_KEY = "mist.profiles";
 const ACTIVE_PROFILE_STATE_KEY = "mist.activeProfile";
 const PROFILE_TOKEN_SECRET_PREFIX = "mist.profileToken.";
+const RESERVED_PROFILE_NAMES = new Set(["add new profile", "$(add) add new profile"]);
+const PROFILE_NAME_MAX_LENGTH = 64;
+const PROFILE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 ._-]*$/;
 
 interface MistProfile {
   id: string;
   name: string;
   host: string;
+}
+
+interface ProfileQuickPickItem extends vscode.QuickPickItem {
+  profileId: string;
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -118,15 +125,18 @@ async function configureProfile(context: vscode.ExtensionContext, output: vscode
   await migrateLegacySettingsIfNeeded(context, output);
 
   const profiles = getProfiles(context);
-  const pickItems: vscode.QuickPickItem[] = [
+  const pickItems: Array<vscode.QuickPickItem & { action: "add" | "edit"; profileId?: string }> = [
     {
       label: "$(add) Add New Profile",
-      description: "Create a new token+host profile"
+      description: "Create a new token+host profile",
+      action: "add"
     },
     ...profiles.map((profile) => ({
       label: profile.name,
       description: profile.host,
-      detail: "Update this profile"
+      detail: "Update this profile",
+      action: "edit" as const,
+      profileId: profile.id
     }))
   ];
 
@@ -140,7 +150,7 @@ async function configureProfile(context: vscode.ExtensionContext, output: vscode
     return;
   }
 
-  if (selected.label === "$(add) Add New Profile") {
+  if (selected.action === "add") {
     const name = await promptForProfileName(profiles);
     if (!name) {
       return;
@@ -173,7 +183,7 @@ async function configureProfile(context: vscode.ExtensionContext, output: vscode
     return;
   }
 
-  const existingProfile = profiles.find((profile) => profile.name === selected.label);
+  const existingProfile = profiles.find((profile) => profile.id === selected.profileId);
   if (!existingProfile) {
     vscode.window.showErrorMessage("Selected profile could not be found.");
     return;
@@ -230,11 +240,12 @@ async function selectActiveProfile(context: vscode.ExtensionContext, output: vsc
   }
 
   const activeProfileId = context.globalState.get<string>(ACTIVE_PROFILE_STATE_KEY);
-  const selected = await vscode.window.showQuickPick(
-    profiles.map((profile) => ({
+  const selected = await vscode.window.showQuickPick<ProfileQuickPickItem>(
+    profiles.map((profile): ProfileQuickPickItem => ({
       label: profile.name,
       description: profile.host,
-      detail: profile.id === activeProfileId ? "Currently active" : undefined
+      detail: profile.id === activeProfileId ? "Currently active" : undefined,
+      profileId: profile.id
     })),
     {
       title: "Select Active Mist MCP Profile",
@@ -247,7 +258,7 @@ async function selectActiveProfile(context: vscode.ExtensionContext, output: vsc
     return;
   }
 
-  const profile = profiles.find((item) => item.name === selected.label);
+  const profile = profiles.find((item) => item.id === selected.profileId);
   if (!profile) {
     vscode.window.showErrorMessage("Selected profile could not be found.");
     return;
@@ -430,10 +441,11 @@ async function getOrPromptActiveProfile(
     return profiles[0];
   }
 
-  const selected = await vscode.window.showQuickPick(
-    profiles.map((profile) => ({
+  const selected = await vscode.window.showQuickPick<ProfileQuickPickItem>(
+    profiles.map((profile): ProfileQuickPickItem => ({
       label: profile.name,
-      description: profile.host
+      description: profile.host,
+      profileId: profile.id
     })),
     {
       title: "Select Active Mist MCP Profile",
@@ -446,7 +458,7 @@ async function getOrPromptActiveProfile(
     return undefined;
   }
 
-  const profile = profiles.find((item) => item.name === selected.label);
+  const profile = profiles.find((item) => item.id === selected.profileId);
   if (!profile) {
     return undefined;
   }
@@ -462,15 +474,25 @@ async function promptForToken(): Promise<string | undefined> {
     password: true,
     ignoreFocusOut: true,
     validateInput: (value) => {
-      if (!value.trim()) {
+      const normalized = value.trim();
+      if (!normalized) {
         return "Token cannot be empty.";
+      }
+
+      if (!isSafeHeaderValue(normalized)) {
+        return "Token cannot contain line breaks or control characters.";
       }
 
       return undefined;
     }
   });
 
-  return token?.trim();
+  const normalized = token?.trim();
+  if (!normalized || !isSafeHeaderValue(normalized)) {
+    return undefined;
+  }
+
+  return normalized;
 }
 
 async function promptForOptionalToken(options: { title: string; prompt: string }): Promise<string | undefined> {
@@ -478,11 +500,27 @@ async function promptForOptionalToken(options: { title: string; prompt: string }
     title: options.title,
     prompt: options.prompt,
     password: true,
-    ignoreFocusOut: true
+    ignoreFocusOut: true,
+    validateInput: (value) => {
+      const normalized = value.trim();
+      if (!normalized) {
+        return undefined;
+      }
+
+      if (!isSafeHeaderValue(normalized)) {
+        return "Token cannot contain line breaks or control characters.";
+      }
+
+      return undefined;
+    }
   });
 
   const normalized = token?.trim();
   if (!normalized) {
+    return undefined;
+  }
+
+  if (!isSafeHeaderValue(normalized)) {
     return undefined;
   }
 
@@ -496,20 +534,16 @@ async function promptForProfileName(existingProfiles: MistProfile[]): Promise<st
     prompt: "Enter a unique profile name",
     ignoreFocusOut: true,
     validateInput: (value) => {
-      const trimmed = value.trim();
-      if (!trimmed) {
-        return "Profile name cannot be empty.";
-      }
-
-      if (existingNames.has(trimmed.toLowerCase())) {
-        return "A profile with this name already exists.";
-      }
-
-      return undefined;
+      return getProfileNameValidationError(value, existingNames);
     }
   });
 
-  return name?.trim();
+  const normalized = name?.trim();
+  if (!normalized || getProfileNameValidationError(normalized, existingNames)) {
+    return undefined;
+  }
+
+  return normalized;
 }
 
 async function promptForRenamedProfileName(
@@ -528,20 +562,16 @@ async function promptForRenamedProfileName(
     value: currentProfile.name,
     ignoreFocusOut: true,
     validateInput: (value) => {
-      const trimmed = value.trim();
-      if (!trimmed) {
-        return "Profile name cannot be empty.";
-      }
-
-      if (existingNames.has(trimmed.toLowerCase())) {
-        return "A profile with this name already exists.";
-      }
-
-      return undefined;
+      return getProfileNameValidationError(value, existingNames);
     }
   });
 
-  return name?.trim();
+  const normalized = name?.trim();
+  if (!normalized || getProfileNameValidationError(normalized, existingNames)) {
+    return undefined;
+  }
+
+  return normalized;
 }
 
 async function promptForHost(defaultHost: string): Promise<string | undefined> {
@@ -608,10 +638,11 @@ async function promptForExistingProfile(
     return undefined;
   }
 
-  const selected = await vscode.window.showQuickPick(
-    profiles.map((profile) => ({
+  const selected = await vscode.window.showQuickPick<ProfileQuickPickItem>(
+    profiles.map((profile): ProfileQuickPickItem => ({
       label: profile.name,
-      description: profile.host
+      description: profile.host,
+      profileId: profile.id
     })),
     {
       title,
@@ -624,7 +655,7 @@ async function promptForExistingProfile(
     return undefined;
   }
 
-  return profiles.find((profile) => profile.name === selected.label);
+  return profiles.find((profile) => profile.id === selected.profileId);
 }
 
 async function saveProfiles(context: vscode.ExtensionContext, profiles: MistProfile[]): Promise<void> {
@@ -669,4 +700,34 @@ async function migrateLegacySettingsIfNeeded(
   await context.secrets.delete(LEGACY_TOKEN_SECRET_KEY);
   await context.globalState.update(LEGACY_HOST_STATE_KEY, undefined);
   output.appendLine("Migrated legacy Mist MCP configuration to profile-based settings.");
+}
+
+function isSafeHeaderValue(input: string): boolean {
+  return !/[\r\n\x00-\x1F\x7F]/.test(input);
+}
+
+function getProfileNameValidationError(value: string, existingNames: Set<string>): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "Profile name cannot be empty.";
+  }
+
+  if (trimmed.length > PROFILE_NAME_MAX_LENGTH) {
+    return `Profile name must be ${PROFILE_NAME_MAX_LENGTH} characters or fewer.`;
+  }
+
+  if (!PROFILE_NAME_PATTERN.test(trimmed)) {
+    return "Use letters, numbers, spaces, dot, underscore, or hyphen. Name must start with a letter or number.";
+  }
+
+  const lowered = trimmed.toLowerCase();
+  if (RESERVED_PROFILE_NAMES.has(lowered)) {
+    return "This profile name is reserved.";
+  }
+
+  if (existingNames.has(lowered)) {
+    return "A profile with this name already exists.";
+  }
+
+  return undefined;
 }

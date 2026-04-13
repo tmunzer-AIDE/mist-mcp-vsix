@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.2.1 - 2026-04-13
+
+- Hardened token validation to reject line breaks and control characters before storing or sending headers.
+- Tightened profile name validation (reserved names, character restrictions, and max length).
+- Switched profile selection logic to use internal profile IDs (avoids name/label collision edge cases).
+- Synced README command and endpoint documentation with current extension behavior.
+
 ## 0.2.0 - 2026-04-13
 
 - Added profile-based configuration to support multiple Mist API tokens.

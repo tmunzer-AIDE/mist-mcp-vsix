@@ -1,4 +1,4 @@
-export const MIST_SERVER_URI = "https://mcp.stage.ai.juniper.net/mcp/mist";
+export const MIST_SERVER_URI = "https://mcp.ai.juniper.net/mcp/mist";
 
 export const MIST_HOST_OPTIONS = [
   "https://api.mist.com",

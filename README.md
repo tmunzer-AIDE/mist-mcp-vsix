@@ -4,7 +4,7 @@ This extension distributes a preconfigured MCP server definition provided as **M
 
 The server is configured as:
 
-- URL: `https://mcp.stage.ai.juniper.net/mcp/mist`
+- URL: `https://mcp.ai.juniper.net/mcp/mist`
 - Transport: HTTP
 - Headers:
   - `Authorization: Bearer <token>`
@@ -42,6 +42,7 @@ Default host is `https://api.mist.com`.
 - `Mist MCP: Select Active Profile`
 - `Mist MCP: Edit Profile`
 - `Mist MCP: Delete Profile`
+- `Mist MCP: Rename Profile`
 - `Mist MCP: Clear Active Profile Token`
 
 ## Configure and Use
@@ -67,7 +68,7 @@ The token is saved in VS Code Secret Storage and the host is saved in extension 
 1. Open Copilot Chat / agent mode in VS Code.
 2. Start any flow that uses MCP tools.
 3. When VS Code resolves the server, this extension provides:
-  - MCP URL: `https://mcp.stage.ai.juniper.net/mcp/mist`
+  - MCP URL: `https://mcp.ai.juniper.net/mcp/mist`
   - `Authorization: Bearer <token>`
   - `X-Mist-Base-URL: <selected-host>`
 
@@ -79,6 +80,7 @@ If token or host is missing, VS Code prompts you.
 - Run `Mist MCP: Select Active Profile` to switch which token/host is used.
 - Run `Mist MCP: Edit Profile` to modify the host and optionally replace the token of one profile.
 - Run `Mist MCP: Delete Profile` to remove one profile and its stored token.
+- Run `Mist MCP: Rename Profile` to rename one profile.
 - Run `Mist MCP: Clear Active Profile Token` to remove only the active profile token.
 
 ## Development
