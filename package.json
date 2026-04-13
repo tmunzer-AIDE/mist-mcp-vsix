@@ -3,7 +3,7 @@
   "displayName": "Mist MCP Provider",
   "description": "Provides a preconfigured Mist MCP server for VS Code.",
   "icon": "media/icon.png",
-  "version": "0.2.3",
+  "version": "0.2.5",
   "publisher": "tmunzer",
   "repository": {
     "type": "git",
@@ -64,7 +64,7 @@
       },
       {
         "command": "mistMcpProvider.installSkills",
-        "title": "Mist MCP: Install Skills From Repo"
+        "title": "Mist MCP: Install Skills"
       },
       {
         "command": "mistMcpProvider.updateSkills",

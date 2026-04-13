@@ -45,7 +45,7 @@ Default host is `https://api.mist.com`.
 - `Mist MCP: Rename Profile`
 - `Mist MCP: Show Active Profile`
 - `Mist MCP: Clear Active Profile Token`
-- `Mist MCP: Install Skills From Repo`
+- `Mist MCP: Install Skills`
 - `Mist MCP: Update Installed Skills`
 - `Mist MCP: Remove Installed Skills`
 
@@ -112,7 +112,7 @@ You can install those skills into either:
 ### Install skills from a repo
 
 1. Open Command Palette.
-2. Run `Mist MCP: Install Skills From Repo`.
+2. Run `Mist MCP: Install Skills`.
 3. Choose install target (`Workspace` or `Global`).
 
 The extension scans the repo for folders that contain `SKILL.md` and installs each discovered skill folder.
